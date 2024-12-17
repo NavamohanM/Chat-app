@@ -98,5 +98,5 @@ Feel free to contact me for any queries or suggestions.
 
 **Navamohan M**
 
-- GitHub: [Your GitHub Profile](https://github.com/yourusername)
-- Email: your-email@example.com
+- GitHub:https:/github.com/NavamohanM/
+- Email:navamohan5219@gmail.com
