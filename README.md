@@ -98,5 +98,5 @@ Feel free to contact me for any queries or suggestions.
 
 **Navamohan M**
 
-- GitHub:https:/github.com/NavamohanM/
+- GitHub: https://github.com/NavamohanM/
 - Email:navamohan5219@gmail.com
