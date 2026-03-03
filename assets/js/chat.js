@@ -407,6 +407,20 @@ async function markRead(fromId) {
     } catch(e) {}
 }
 
+// ── Broadcast to another user's channel ──────────────────────
+function broadcastToUser(userId, event, payload) {
+    // Each user listens on 'broadcast-{their_id}'
+    // We send to that channel so they receive it instantly
+    const ch = supabaseClient.channel('broadcast-' + userId);
+    ch.subscribe(status => {
+        if (status === 'SUBSCRIBED') {
+            ch.send({ type: 'broadcast', event, payload });
+            // Clean up after sending
+            setTimeout(() => supabaseClient.removeChannel(ch), 1000);
+        }
+    });
+}
+
 // ── Realtime subscription ─────────────────────────────────────
 function subscribeRealtime() {
     if (channel) { supabaseClient.removeChannel(channel); channel = null; }
@@ -426,16 +440,38 @@ function subscribeRealtime() {
         });
 }
 
-// ── Broadcast channel for typing indicators ───────────────────
+// ── Broadcast channel (typing + instant message delivery) ─────
 function subscribeBroadcast() {
     if (broadcastChannel) { supabaseClient.removeChannel(broadcastChannel); }
     broadcastChannel = supabaseClient
-        .channel('typing-broadcast')
+        .channel('broadcast-' + CURRENT_USER.id)
         .on('broadcast', { event: 'typing' }, ({ payload }) => {
             if (!activePeer) return;
             if (payload.from === activePeer.id && payload.to === CURRENT_USER.id) {
                 if (payload.typing) showTyping(payload.username);
                 else hideTyping();
+            }
+        })
+        .on('broadcast', { event: 'new_message' }, ({ payload }) => {
+            // Instant message delivery — sent by the other user directly
+            const msg = payload.msg;
+            if (!msg) return;
+            const forMe      = msg.receiver_id === CURRENT_USER.id;
+            const fromActive = activePeer && msg.user_id === activePeer.id;
+            if (forMe && fromActive) {
+                if (messages.find(m => m.id === msg.id)) return;
+                appendMessage(msg, true);
+                scrollToBottom(true);
+                playSound('receive');
+                markRead(msg.user_id);
+                lastMsgTs = msg.created_at;
+                setPreview(activePeer.id, msg.message || '📎 File');
+                updateUserTime(activePeer.id);
+            } else if (forMe && !fromActive) {
+                addUnread(msg.user_id);
+                setPreview(msg.user_id, msg.message || '📎 File');
+                updateUserTime(msg.user_id);
+                playSound('receive');
             }
         })
         .subscribe();
@@ -445,20 +481,28 @@ function subscribeBroadcast() {
 function onNewMessage(payload) {
     const msg = payload.new;
 
+    // ── CASE 1: receiver_id missing from payload ──────────────
+    // This happens when REPLICA IDENTITY FULL is not set.
+    // We get the insert but don't know who it's for.
+    // Strategy: always fetchLatest for active chat, and poll
+    // unread counts for all users.
+    if (!msg.receiver_id) {
+        if (activePeer) fetchLatest();
+        fetchUnreadPreviews();
+        return;
+    }
+
+    // ── CASE 2: Full payload available ───────────────────────
     const isMine     = msg.user_id     === CURRENT_USER.id;
     const forMe      = msg.receiver_id === CURRENT_USER.id;
     const fromActive = activePeer && msg.user_id     === activePeer.id;
     const toActive   = activePeer && msg.receiver_id === activePeer.id;
 
-    // Fallback: receiver_id missing from payload (REPLICA IDENTITY not full)
-    if (!msg.receiver_id) {
-        if (activePeer && fromActive) fetchLatest();
-        return;
-    }
-
+    // Message belongs to the currently open conversation
     if (activePeer && ((isMine && toActive) || (forMe && fromActive))) {
         if (messages.find(m => m.id === msg.id)) return;
-        // Replace optimistic temp bubble
+
+        // Replace optimistic temp bubble if exists
         const ti = messages.findIndex(m => String(m.id).startsWith('temp_') && m.user_id === msg.user_id);
         if (ti !== -1) {
             const old = messages[ti].id;
@@ -476,12 +520,25 @@ function onNewMessage(payload) {
         lastMsgTs = msg.created_at;
         setPreview(activePeer.id, msg.message || '📎 File');
         updateUserTime(activePeer.id);
+
+    // Message is for me but from someone I'm not chatting with right now
     } else if (forMe && !fromActive) {
         addUnread(msg.user_id);
         setPreview(msg.user_id, msg.message || '📎 File');
         updateUserTime(msg.user_id);
         playSound('receive');
+
+    // Message is from me to someone else (sent from another tab/device)
+    } else if (isMine && !toActive) {
+        setPreview(msg.receiver_id, msg.message || '📎 File');
+        updateUserTime(msg.receiver_id);
     }
+}
+
+// Fetch latest previews for all users (used when receiver_id missing)
+async function fetchUnreadPreviews() {
+    // Re-fetch latest message for active chat
+    if (activePeer) fetchLatest();
 }
 
 function onUpdateMessage(payload) {
@@ -617,13 +674,17 @@ async function sendMessage() {
         });
         const json = await res.json();
         if (json.success && json.data) {
+            const savedMsg = json.data;
+            // Update optimistic bubble
             const idx = messages.findIndex(m => m.id === tempId);
-            if (idx !== -1) messages[idx] = json.data;
+            if (idx !== -1) messages[idx] = savedMsg;
             const el = document.querySelector(`[data-id="${tempId}"]`);
-            if (el) { el.setAttribute('data-id', json.data.id); el.classList.remove('pending'); updateStatusTick(el, json.data.status || 'sent'); }
+            if (el) { el.setAttribute('data-id', savedMsg.id); el.classList.remove('pending'); updateStatusTick(el, savedMsg.status || 'sent'); }
+
+            // Broadcast directly to receiver's channel for instant delivery
+            broadcastToUser(activePeer.id, 'new_message', { msg: savedMsg });
         }
     } catch(e) {
-        // Network error — add to offline queue
         addToOfflineQueue({ tempId, body });
         const el = document.querySelector(`[data-id="${tempId}"]`);
         if (el) el.classList.add('failed');
@@ -692,10 +753,12 @@ async function sendFile() {
         });
         const json = await res.json();
         if (json.success && json.data) {
+            const savedMsg = json.data;
             const idx = messages.findIndex(m => m.id === tempId);
-            if (idx !== -1) messages[idx] = json.data;
+            if (idx !== -1) messages[idx] = savedMsg;
             const el = document.querySelector(`[data-id="${tempId}"]`);
-            if (el) { el.setAttribute('data-id', json.data.id); el.classList.remove('pending', 'uploading'); refreshBubble(el, json.data); }
+            if (el) { el.setAttribute('data-id', savedMsg.id); el.classList.remove('pending', 'uploading'); refreshBubble(el, savedMsg); }
+            broadcastToUser(activePeer.id, 'new_message', { msg: savedMsg });
         }
         playSound('send');
     } catch(e) {
@@ -1089,7 +1152,7 @@ function updateUserTime(uid) {
 // ── Polling fallback ──────────────────────────────────────────
 function startPolling() {
     if (pollTimer) return;
-    pollTimer = setInterval(() => { if (activePeer && lastMsgTs) fetchLatest(); }, 2500);
+    pollTimer = setInterval(() => { if (activePeer) fetchLatest(); }, 2500);
 }
 function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
 
