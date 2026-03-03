@@ -23,6 +23,7 @@ $data = [
     'username'    => $user['username'],
     'message'     => $message,
     'receiver_id' => $receiver_id,
+    'status'      => 'sent',
 ];
 if ($reply_to) $data['reply_to']  = $reply_to;
 if ($file_url) $data['file_url']  = $file_url;

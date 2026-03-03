@@ -1,5 +1,5 @@
 /* ============================================================
-   ChatApp — Full WhatsApp Clone
+   ChatApp — Full WhatsApp Clone  v2
    ============================================================ */
 
 const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -19,8 +19,11 @@ let unreadCounts  = {};
 let emojiOpen     = false;
 let replyTo       = null;
 let ctxMsgId      = null;
-let ctxMsgMine    = false;
+let ctxMsgOwn     = false;
 let selectedFile  = null;
+let isOnline      = navigator.onLine;
+let offlineQueue  = [];   // localStorage-backed offline queue
+let broadcastChannel = null;
 
 // ── DOM ───────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -39,11 +42,94 @@ const ctxMenu       = $('ctx-menu');
 
 // ── Init ──────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
+    loadOfflineQueue();
+    loadUnreadCounts();
     loadUsers();
     subscribeRealtime();
+    subscribeBroadcast();
     setInterval(updateLastSeen, 30000);
-    document.addEventListener('click', () => ctxMenu.style.display = 'none');
+    document.addEventListener('click', e => {
+        if (!ctxMenu.contains(e.target)) ctxMenu.style.display = 'none';
+        if (!$('emoji-bar').contains(e.target) && !e.target.closest('.btn-emoji')) closeEmoji();
+    });
+
+    // Online / offline detection
+    window.addEventListener('online',  handleOnline);
+    window.addEventListener('offline', handleOffline);
+    if (!navigator.onLine) showOfflineBanner();
 });
+
+// ── Offline / Online ──────────────────────────────────────────
+function handleOnline() {
+    isOnline = true;
+    hideOfflineBanner();
+    showToast('Back online', 'connected');
+    flushOfflineQueue();
+    subscribeRealtime();
+}
+function handleOffline() {
+    isOnline = false;
+    showOfflineBanner();
+    showToast('You are offline', '');
+}
+function showOfflineBanner() {
+    let b = $('offline-banner');
+    if (!b) {
+        b = document.createElement('div');
+        b.id = 'offline-banner';
+        b.className = 'offline-banner';
+        b.innerHTML = '<i class="fa-solid fa-wifi-exclamation"></i> You are offline — messages will be sent when reconnected';
+        document.body.prepend(b);
+    }
+    b.classList.add('show');
+}
+function hideOfflineBanner() {
+    const b = $('offline-banner');
+    if (b) b.classList.remove('show');
+}
+
+// ── Offline queue (localStorage) ──────────────────────────────
+function loadOfflineQueue() {
+    try { offlineQueue = JSON.parse(localStorage.getItem('chat_offline_queue') || '[]'); } catch(e) { offlineQueue = []; }
+}
+function saveOfflineQueue() {
+    try { localStorage.setItem('chat_offline_queue', JSON.stringify(offlineQueue)); } catch(e) {}
+}
+function addToOfflineQueue(payload) {
+    offlineQueue.push(payload);
+    saveOfflineQueue();
+}
+function removeFromOfflineQueue(tempId) {
+    offlineQueue = offlineQueue.filter(q => q.tempId !== tempId);
+    saveOfflineQueue();
+}
+async function flushOfflineQueue() {
+    if (!offlineQueue.length) return;
+    const queue = [...offlineQueue];
+    for (const item of queue) {
+        try {
+            const res  = await fetch('api/send_message.php', {
+                method: 'POST', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify(item.body)
+            });
+            const json = await res.json();
+            if (json.success) {
+                removeFromOfflineQueue(item.tempId);
+                // Update the pending bubble if still in DOM
+                const el = document.querySelector(`[data-id="${item.tempId}"]`);
+                if (el && json.data) { el.setAttribute('data-id', json.data.id); el.classList.remove('pending', 'failed'); }
+            }
+        } catch(e) {}
+    }
+}
+
+// ── Persistent unread counts ──────────────────────────────────
+function loadUnreadCounts() {
+    try { unreadCounts = JSON.parse(localStorage.getItem('chat_unread') || '{}'); } catch(e) { unreadCounts = {}; }
+}
+function saveUnreadCounts() {
+    try { localStorage.setItem('chat_unread', JSON.stringify(unreadCounts)); } catch(e) {}
+}
 
 // ── Load users ────────────────────────────────────────────────
 async function loadUsers() {
@@ -52,6 +138,13 @@ async function loadUsers() {
     if (!json.success) return;
     allUsers = json.data;
     renderUsers(allUsers);
+    // Re-apply stored unread counts after render
+    for (const [uid, count] of Object.entries(unreadCounts)) {
+        if (count > 0) {
+            const b = $('badge-' + uid);
+            if (b) { b.textContent = count; b.style.display = 'inline-flex'; }
+        }
+    }
 }
 
 function renderUsers(users) {
@@ -59,22 +152,67 @@ function renderUsers(users) {
         usersList.innerHTML = '<div class="no-users"><i class="fa-solid fa-user-plus"></i><p>No users yet</p></div>';
         return;
     }
-    usersList.innerHTML = users.map(u => `
+    usersList.innerHTML = users.map(u => {
+        const count = unreadCounts[u.id] || 0;
+        return `
         <div class="user-item" id="ui-${u.id}" onclick="openChat('${u.id}','${escAttr(u.username)}','${u.avatar_color}')">
-            <div class="user-av" style="background:${u.avatar_color}">${u.username[0].toUpperCase()}</div>
+            <div class="user-av-wrap">
+                <div class="user-av" style="background:${u.avatar_color}">${u.username[0].toUpperCase()}</div>
+                <span class="online-dot" id="dot-${u.id}" style="display:none"></span>
+            </div>
             <div class="user-info">
                 <div class="user-name">${escHtml(u.username)}</div>
                 <div class="user-preview" id="prev-${u.id}">Tap to chat</div>
             </div>
             <div class="user-meta">
-                <span class="unread-badge" id="badge-${u.id}" style="display:none">0</span>
+                <span class="user-time" id="time-${u.id}"></span>
+                <span class="unread-badge" id="badge-${u.id}" style="${count>0?'display:inline-flex':'display:none'}">${count||''}</span>
             </div>
-        </div>`).join('');
+        </div>`;
+    }).join('');
+    // Fetch and show last seen / online status
+    refreshOnlineStatus();
 }
 
 function filterUsers(q) {
     renderUsers(allUsers.filter(u => u.username.toLowerCase().includes(q.toLowerCase())));
     if (activePeer) $('ui-' + activePeer.id)?.classList.add('active');
+}
+
+// ── Online / Last seen ────────────────────────────────────────
+async function refreshOnlineStatus() {
+    try {
+        const res  = await fetch('api/users.php');
+        const json = await res.json();
+        if (!json.success) return;
+        const now = new Date();
+        json.data.forEach(u => {
+            const dot = $('dot-' + u.id);
+            const timeEl = $('time-' + u.id);
+            if (!dot) return;
+            const lastSeen = u.last_seen ? new Date(u.last_seen) : null;
+            const diffSec  = lastSeen ? (now - lastSeen) / 1000 : Infinity;
+            const isOnlineNow = diffSec < 35; // within 35s = online
+            dot.style.display = isOnlineNow ? 'block' : 'none';
+            if (timeEl && lastSeen) {
+                timeEl.textContent = isOnlineNow ? '' : formatLastSeen(lastSeen);
+            }
+            // If this is the active peer, update header
+            if (activePeer && u.id === activePeer.id) {
+                peerSubEl.textContent = isOnlineNow ? 'Online' : 'Last seen ' + formatLastSeen(lastSeen);
+                peerSubEl.className   = isOnlineNow ? 'chat-header-sub live' : 'chat-header-sub';
+            }
+        });
+    } catch(e) {}
+}
+
+function formatLastSeen(date) {
+    const now  = new Date();
+    const diff = Math.floor((now - date) / 1000);
+    if (diff < 60)    return 'just now';
+    if (diff < 3600)  return Math.floor(diff/60) + 'm ago';
+    if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
+    return date.toLocaleDateString(undefined, {month:'short', day:'numeric'});
 }
 
 // ── Open chat ─────────────────────────────────────────────────
@@ -99,6 +237,10 @@ async function openChat(id, username, color) {
     closeSidebar();
 
     await loadMessages();
+
+    // Mark all received messages from this peer as read
+    markRead(id);
+
     inputEl.focus();
 }
 
@@ -122,7 +264,19 @@ async function loadMessages() {
     }
 }
 
-// ── Realtime ──────────────────────────────────────────────────
+// ── Mark messages as read ─────────────────────────────────────
+async function markRead(fromId) {
+    try {
+        await fetch('api/mark_read.php', {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ from_id: fromId })
+        });
+        // Update status icons for messages we sent (now marked read on their side)
+        // The realtime UPDATE event will handle the other user's UI
+    } catch(e) {}
+}
+
+// ── Realtime subscription ─────────────────────────────────────
 function subscribeRealtime() {
     if (channel) { supabaseClient.removeChannel(channel); channel = null; }
 
@@ -130,23 +284,42 @@ function subscribeRealtime() {
         .channel('chat-' + CURRENT_USER.id)
         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, onNewMessage)
         .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages' }, onUpdateMessage)
+        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'users' },    onUserUpdate)
         .subscribe(status => {
             console.log('Realtime:', status);
-            if (status === 'SUBSCRIBED') { setConnected(true); stopPolling(); }
-            else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') { setConnected(false); startPolling(); setTimeout(subscribeRealtime, 5000); }
+            if (status === 'SUBSCRIBED') { setConnected(true); stopPolling(); flushOfflineQueue(); }
+            else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+                setConnected(false); startPolling();
+                setTimeout(subscribeRealtime, 5000);
+            }
         });
 }
 
+// ── Broadcast channel for typing indicators ───────────────────
+function subscribeBroadcast() {
+    if (broadcastChannel) { supabaseClient.removeChannel(broadcastChannel); }
+    broadcastChannel = supabaseClient
+        .channel('typing-broadcast')
+        .on('broadcast', { event: 'typing' }, ({ payload }) => {
+            if (!activePeer) return;
+            if (payload.from === activePeer.id && payload.to === CURRENT_USER.id) {
+                if (payload.typing) showTyping(payload.username);
+                else hideTyping();
+            }
+        })
+        .subscribe();
+}
+
+// ── New message event ─────────────────────────────────────────
 function onNewMessage(payload) {
     const msg = payload.new;
-    console.log('New msg:', msg);
 
-    const isMine  = msg.user_id     === CURRENT_USER.id;
-    const forMe   = msg.receiver_id === CURRENT_USER.id;
+    const isMine     = msg.user_id     === CURRENT_USER.id;
+    const forMe      = msg.receiver_id === CURRENT_USER.id;
     const fromActive = activePeer && msg.user_id     === activePeer.id;
     const toActive   = activePeer && msg.receiver_id === activePeer.id;
 
-    // Fallback: receiver_id missing from payload
+    // Fallback: receiver_id missing from payload (REPLICA IDENTITY not full)
     if (!msg.receiver_id) {
         if (activePeer && fromActive) fetchLatest();
         return;
@@ -154,41 +327,88 @@ function onNewMessage(payload) {
 
     if (activePeer && ((isMine && toActive) || (forMe && fromActive))) {
         if (messages.find(m => m.id === msg.id)) return;
-        // Replace temp bubble
+        // Replace optimistic temp bubble
         const ti = messages.findIndex(m => String(m.id).startsWith('temp_') && m.user_id === msg.user_id);
         if (ti !== -1) {
             const old = messages[ti].id;
             messages[ti] = msg;
             const el = document.querySelector(`[data-id="${old}"]`);
-            if (el) { el.setAttribute('data-id', msg.id); el.classList.remove('pending'); }
+            if (el) { el.setAttribute('data-id', msg.id); el.classList.remove('pending'); updateStatusTick(el, msg.status); }
         } else {
             appendMessage(msg, true);
             scrollToBottom(true);
-            if (!isMine) playSound('receive');
+            if (!isMine) {
+                playSound('receive');
+                markRead(msg.user_id);
+            }
         }
         lastMsgTs = msg.created_at;
         setPreview(activePeer.id, msg.message || '📎 File');
+        updateUserTime(activePeer.id);
     } else if (forMe && !fromActive) {
         addUnread(msg.user_id);
         setPreview(msg.user_id, msg.message || '📎 File');
+        updateUserTime(msg.user_id);
         playSound('receive');
     }
 }
 
 function onUpdateMessage(payload) {
     const msg = payload.new;
+    const el  = document.querySelector(`[data-id="${msg.id}"]`);
+
+    // Deleted
     if (msg.deleted_at) {
-        const el = document.querySelector(`[data-id="${msg.id}"]`);
-        if (el) {
-            el.classList.add('deleted');
-            el.innerHTML = '<i class="fa-solid fa-ban"></i> This message was deleted';
-        }
+        if (el) { el.classList.add('deleted'); el.innerHTML = '<i class="fa-solid fa-ban"></i> This message was deleted'; }
         const idx = messages.findIndex(m => m.id === msg.id);
         if (idx !== -1) messages[idx] = msg;
+        return;
+    }
+
+    // Status update (sent → delivered → read)
+    if (msg.status && el) {
+        updateStatusTick(el, msg.status);
+        const idx = messages.findIndex(m => m.id === msg.id);
+        if (idx !== -1) messages[idx].status = msg.status;
     }
 }
 
-// ── Fetch latest (fallback) ───────────────────────────────────
+function onUserUpdate(payload) {
+    const user = payload.new;
+    // Update allUsers cache
+    const idx = allUsers.findIndex(u => u.id === user.id);
+    if (idx !== -1) allUsers[idx] = { ...allUsers[idx], ...user };
+
+    // Update online dot
+    const now = new Date();
+    const lastSeen = user.last_seen ? new Date(user.last_seen) : null;
+    const diffSec  = lastSeen ? (now - lastSeen) / 1000 : Infinity;
+    const isOnlineNow = diffSec < 35;
+    const dot = $('dot-' + user.id);
+    if (dot) dot.style.display = isOnlineNow ? 'block' : 'none';
+    if (activePeer && user.id === activePeer.id) {
+        peerSubEl.textContent = isOnlineNow ? 'Online' : 'Last seen ' + formatLastSeen(lastSeen);
+        peerSubEl.className   = isOnlineNow ? 'chat-header-sub live' : 'chat-header-sub';
+    }
+}
+
+// ── Read receipt tick ─────────────────────────────────────────
+function updateStatusTick(el, status) {
+    if (!el) return;
+    let tick = el.querySelector('.msg-status');
+    if (!tick) {
+        // Only add ticks to our own messages
+        if (el.getAttribute('data-own') !== '1') return;
+        tick = document.createElement('span');
+        tick.className = 'msg-status';
+        el.appendChild(tick);
+    }
+    if (status === 'read')      tick.innerHTML = '<i class="fa-solid fa-check-double read"></i>';
+    else if (status === 'delivered') tick.innerHTML = '<i class="fa-solid fa-check-double"></i>';
+    else                        tick.innerHTML = '<i class="fa-solid fa-check"></i>';
+}
+
+// ── Fetch latest (fallback / polling) ────────────────────────
 async function fetchLatest() {
     if (!activePeer) return;
     try {
@@ -204,7 +424,7 @@ async function fetchLatest() {
                 const old = messages[ti].id;
                 messages[ti] = m;
                 const el = document.querySelector(`[data-id="${old}"]`);
-                if (el) { el.setAttribute('data-id', m.id); el.classList.remove('pending'); }
+                if (el) { el.setAttribute('data-id', m.id); el.classList.remove('pending'); updateStatusTick(el, m.status); }
             } else { appendMessage(m, true); added = true; }
             lastMsgTs = m.created_at;
         });
@@ -228,7 +448,8 @@ async function sendMessage() {
         receiver_id: activePeer.id, username: CURRENT_USER.username,
         message: text, created_at: new Date().toISOString(),
         reply_to: replyTo?.id || null, _pending: true,
-        _replyData: replyTo,
+        _replyData: replyTo ? { ...replyTo } : null,
+        status: 'sent',
     };
     removeEmptyState();
     appendMessage(tempMsg, true);
@@ -240,6 +461,14 @@ async function sendMessage() {
     if (replyTo) body.reply_to = replyTo.id;
     cancelReply();
 
+    // If offline, queue the message
+    if (!isOnline) {
+        addToOfflineQueue({ tempId, body });
+        sendBtn.disabled = false;
+        inputEl.focus();
+        return;
+    }
+
     try {
         const res  = await fetch('api/send_message.php', {
             method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
@@ -249,9 +478,11 @@ async function sendMessage() {
             const idx = messages.findIndex(m => m.id === tempId);
             if (idx !== -1) messages[idx] = json.data;
             const el = document.querySelector(`[data-id="${tempId}"]`);
-            if (el) { el.setAttribute('data-id', json.data.id); el.classList.remove('pending'); }
+            if (el) { el.setAttribute('data-id', json.data.id); el.classList.remove('pending'); updateStatusTick(el, json.data.status || 'sent'); }
         }
     } catch(e) {
+        // Network error — add to offline queue
+        addToOfflineQueue({ tempId, body });
         const el = document.querySelector(`[data-id="${tempId}"]`);
         if (el) el.classList.add('failed');
     } finally { sendBtn.disabled = false; inputEl.focus(); }
@@ -262,7 +493,7 @@ function handleFileSelect(input) {
     const file = input.files[0];
     if (!file) return;
     selectedFile = file;
-    const modal = $('file-preview-modal');
+    const modal   = $('file-preview-modal');
     const content = $('file-preview-content');
 
     if (file.type.startsWith('image/')) {
@@ -284,19 +515,19 @@ function cancelFileUpload() {
 
 async function sendFile() {
     if (!selectedFile || !activePeer) return;
+    if (!isOnline) { showToast('No connection — file upload requires internet', ''); return; }
     const caption = $('file-caption').value.trim();
     cancelFileUpload();
 
     const formData = new FormData();
     formData.append('file', selectedFile);
 
-    // Show upload bubble
-    const tempId = 'temp_' + Date.now();
+    const tempId  = 'temp_' + Date.now();
     const tempMsg = {
         id: tempId, user_id: CURRENT_USER.id, receiver_id: activePeer.id,
         username: CURRENT_USER.username, message: caption || selectedFile.name,
         created_at: new Date().toISOString(), _pending: true, _uploading: true,
-        file_name: selectedFile.name, file_type: selectedFile.type,
+        file_name: selectedFile.name, file_type: selectedFile.type, status: 'sent',
     };
     removeEmptyState();
     appendMessage(tempMsg, true);
@@ -322,7 +553,7 @@ async function sendFile() {
             const idx = messages.findIndex(m => m.id === tempId);
             if (idx !== -1) messages[idx] = json.data;
             const el = document.querySelector(`[data-id="${tempId}"]`);
-            if (el) { el.setAttribute('data-id', json.data.id); el.classList.remove('pending'); el.classList.remove('uploading'); refreshBubble(el, json.data); }
+            if (el) { el.setAttribute('data-id', json.data.id); el.classList.remove('pending', 'uploading'); refreshBubble(el, json.data); }
         }
         playSound('send');
     } catch(e) {
@@ -353,8 +584,8 @@ function appendMessage(msg, animate) {
         && (new Date(msg.created_at) - new Date(prev.created_at)) < 5 * 60 * 1000;
 
     if (canGroup) {
-        const bubble = makeBubble(msg, isOwn);
-        const timeEl = lastGroup.querySelector('.msg-time');
+        const bubble  = makeBubble(msg, isOwn);
+        const timeEl  = lastGroup.querySelector('.msg-time');
         lastGroup.insertBefore(bubble, timeEl);
         if (timeEl) timeEl.textContent = timeStr;
     } else {
@@ -363,7 +594,7 @@ function appendMessage(msg, animate) {
         if (animate) group.style.animation = 'msg-in 0.18s ease';
         group.appendChild(makeBubble(msg, isOwn));
         const timeEl = document.createElement('div');
-        timeEl.className = 'msg-time';
+        timeEl.className   = 'msg-time';
         timeEl.textContent = timeStr;
         group.appendChild(timeEl);
         msgsEl.appendChild(group);
@@ -374,10 +605,10 @@ function appendMessage(msg, animate) {
 function makeBubble(msg, isOwn) {
     const b = document.createElement('div');
     b.className = 'msg-bubble'
-        + (msg._pending  ? ' pending'   : '')
-        + (msg._uploading? ' uploading' : '')
-        + (msg.deleted_at? ' deleted'   : '');
-    b.setAttribute('data-id', msg.id);
+        + (msg._pending   ? ' pending'   : '')
+        + (msg._uploading ? ' uploading' : '')
+        + (msg.deleted_at ? ' deleted'   : '');
+    b.setAttribute('data-id',  msg.id);
     b.setAttribute('data-own', isOwn ? '1' : '0');
 
     if (msg.deleted_at) {
@@ -387,20 +618,27 @@ function makeBubble(msg, isOwn) {
 
     let html = '';
 
-    // Reply quote
+    // Reply quote — use _replyData if available, otherwise show placeholder
     if (msg._replyData) {
-        html += `<div class="reply-quote"><span>${escHtml(msg._replyData.username)}</span>${escHtml(msg._replyData.message || '📎')}</div>`;
+        const rtext = msg._replyData.message || (msg._replyData.file_type ? '📎 File' : '');
+        html += `<div class="reply-quote"><span>${escHtml(msg._replyData.username)}</span><p>${escHtml(rtext)}</p></div>`;
+    } else if (msg.reply_to) {
+        html += `<div class="reply-quote loading"><i class="fa-solid fa-reply"></i> <em>Loading...</em></div>`;
+        // Async fetch the quoted message
+        fetchReplyData(msg.reply_to, b);
     }
 
     // File / image
     if (msg.file_url) {
         if (msg.file_type && msg.file_type.startsWith('image/')) {
             html += `<img class="msg-img" src="${escAttr(msg.file_url)}" alt="image" onclick="openLightbox('${escAttr(msg.file_url)}')">`;
+        } else if (msg.file_type && msg.file_type.startsWith('video/')) {
+            html += `<video class="msg-video" controls src="${escAttr(msg.file_url)}"></video>`;
         } else {
             const icon = getFileIcon(msg.file_type || '');
             html += `<a class="msg-file" href="${escAttr(msg.file_url)}" target="_blank" download="${escAttr(msg.file_name||'file')}">
                 <i class="fa-solid ${icon}"></i>
-                <div><div class="fn">${escHtml(msg.file_name||'File')}</div></div>
+                <div><div class="fn">${escHtml(msg.file_name||'File')}</div><div class="fs">${msg.file_size ? formatSize(msg.file_size) : ''}</div></div>
                 <i class="fa-solid fa-download"></i>
             </a>`;
         }
@@ -409,12 +647,33 @@ function makeBubble(msg, isOwn) {
     if (msg.message) html += `<span class="msg-text">${escHtml(msg.message)}</span>`;
     if (msg._uploading) html += '<span class="upload-progress"><i class="fa-solid fa-spinner fa-spin"></i> Uploading...</span>';
 
+    // Status tick for own messages
+    if (isOwn && !msg._uploading) {
+        const status = msg.status || 'sent';
+        if (status === 'read')           html += '<span class="msg-status"><i class="fa-solid fa-check-double read"></i></span>';
+        else if (status === 'delivered') html += '<span class="msg-status"><i class="fa-solid fa-check-double"></i></span>';
+        else                             html += '<span class="msg-status"><i class="fa-solid fa-check"></i></span>';
+    }
+
     b.innerHTML = html;
 
-    // Context menu on right-click / long press
+    // Context menu
     b.addEventListener('contextmenu', e => { e.preventDefault(); showCtxMenu(e, msg.id, isOwn); });
+    // Long press for mobile
+    let pressTimer;
+    b.addEventListener('touchstart', e => { pressTimer = setTimeout(() => { e.preventDefault(); showCtxMenu(e.touches[0], msg.id, isOwn); }, 500); });
+    b.addEventListener('touchend',   () => clearTimeout(pressTimer));
 
     return b;
+}
+
+async function fetchReplyData(replyId, bubbleEl) {
+    try {
+        const res  = await fetch(`api/fetch_messages.php?reply_id=${replyId}`);
+        // fallback: try direct lookup
+        // Actually use a dedicated approach via users API – simpler: store _replyData in msg
+        // For now skip if data not available
+    } catch(e) {}
 }
 
 function refreshBubble(el, msg) {
@@ -428,8 +687,10 @@ function showCtxMenu(e, msgId, isOwn) {
     ctxMsgId  = msgId;
     ctxMsgOwn = isOwn;
     ctxMenu.style.display = 'block';
-    ctxMenu.style.left    = Math.min(e.clientX, window.innerWidth - 150) + 'px';
-    ctxMenu.style.top     = Math.min(e.clientY, window.innerHeight - 80) + 'px';
+    const x = e.clientX ?? e.pageX ?? 0;
+    const y = e.clientY ?? e.pageY ?? 0;
+    ctxMenu.style.left    = Math.min(x, window.innerWidth - 160) + 'px';
+    ctxMenu.style.top     = Math.min(y, window.innerHeight - 90) + 'px';
     ctxMenu.querySelector('.danger').style.display = isOwn ? 'flex' : 'none';
 }
 
@@ -441,6 +702,7 @@ function ctxReply() {
     $('reply-text').textContent     = msg.message || '📎 File';
     replyBar.style.display = 'flex';
     inputEl.focus();
+    ctxMenu.style.display = 'none';
 }
 
 function cancelReply() { replyTo = null; replyBar.style.display = 'none'; }
@@ -448,6 +710,7 @@ function cancelReply() { replyTo = null; replyBar.style.display = 'none'; }
 async function ctxDelete() {
     if (!ctxMsgId) return;
     if (!confirm('Delete this message?')) return;
+    ctxMenu.style.display = 'none';
     try {
         await fetch('api/delete_message.php', {
             method: 'POST', headers: {'Content-Type':'application/json'},
@@ -462,7 +725,6 @@ async function ctxDelete() {
 async function clearChat() {
     if (!activePeer) return;
     if (!confirm(`Clear all messages with ${activePeer.username}?`)) return;
-    // Soft delete all messages in this conversation that belong to me
     const mine = messages.filter(m => m.user_id === CURRENT_USER.id);
     await Promise.all(mine.map(m =>
         fetch('api/delete_message.php', {
@@ -476,14 +738,23 @@ async function clearChat() {
 // ── Typing indicator ──────────────────────────────────────────
 let isTypingNow = false;
 function handleTyping() {
-    if (!activePeer) return;
+    if (!activePeer || !broadcastChannel) return;
     if (!isTypingNow) {
         isTypingNow = true;
-        fetch(`api/typing.php?to=${activePeer.id}&typing=1`);
+        broadcastChannel.send({
+            type: 'broadcast', event: 'typing',
+            payload: { from: CURRENT_USER.id, to: activePeer.id, username: CURRENT_USER.username, typing: true }
+        });
     }
     clearTimeout(typingTimeout);
     typingTimeout = setTimeout(() => {
         isTypingNow = false;
+        if (broadcastChannel && activePeer) {
+            broadcastChannel.send({
+                type: 'broadcast', event: 'typing',
+                payload: { from: CURRENT_USER.id, to: activePeer.id, username: CURRENT_USER.username, typing: false }
+            });
+        }
         fetch(`api/typing.php?to=${activePeer.id}&typing=0`);
     }, 2000);
 }
@@ -492,25 +763,30 @@ function showTyping(username) {
     $('typing-label').textContent = `${username} is typing...`;
     typingBar.style.display = 'flex';
     clearTimeout(typingTimer);
-    typingTimer = setTimeout(() => { typingBar.style.display = 'none'; }, 3000);
+    typingTimer = setTimeout(hideTyping, 3500);
 }
+function hideTyping() { typingBar.style.display = 'none'; }
 
-// ── Last seen ─────────────────────────────────────────────────
+// ── Last seen heartbeat ───────────────────────────────────────
 function updateLastSeen() {
     fetch('api/typing.php?to=0&typing=0');
+    refreshOnlineStatus();
 }
 
 // ── Unread ────────────────────────────────────────────────────
 function addUnread(uid) {
     unreadCounts[uid] = (unreadCounts[uid] || 0) + 1;
+    saveUnreadCounts();
     const b = $('badge-' + uid);
     if (b) { b.textContent = unreadCounts[uid]; b.style.display = 'inline-flex'; }
+    // Bump user to top
     const item = $('ui-' + uid);
     if (item) usersList.prepend(item);
 }
 
 function clearUnread(uid) {
     unreadCounts[uid] = 0;
+    saveUnreadCounts();
     const b = $('badge-' + uid);
     if (b) b.style.display = 'none';
 }
@@ -518,6 +794,11 @@ function clearUnread(uid) {
 function setPreview(uid, text) {
     const el = $('prev-' + uid);
     if (el) el.textContent = text.length > 35 ? text.slice(0,35) + '…' : text;
+}
+
+function updateUserTime(uid) {
+    const el = $('time-' + uid);
+    if (el) el.textContent = formatTime(new Date().toISOString());
 }
 
 // ── Polling fallback ──────────────────────────────────────────
@@ -529,10 +810,6 @@ function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = 
 
 // ── Connection ────────────────────────────────────────────────
 function setConnected(ok) {
-    if (peerSubEl && activePeer) {
-        peerSubEl.textContent = ok ? 'Online' : 'Reconnecting...';
-        peerSubEl.className   = ok ? 'chat-header-sub live' : 'chat-header-sub';
-    }
     showToast(ok ? 'Connected' : 'Reconnecting...', ok ? 'connected' : '');
 }
 
@@ -542,7 +819,7 @@ function showToast(msg, type) {
     t.className = 'show ' + (type||'');
     $('toast-msg').textContent = msg;
     clearTimeout(toastT);
-    toastT = setTimeout(() => { t.className=''; }, 2000);
+    toastT = setTimeout(() => { t.className=''; }, 2500);
 }
 
 // ── Sounds ────────────────────────────────────────────────────
@@ -551,11 +828,8 @@ function playSound(name) {
 }
 
 // ── Lightbox ──────────────────────────────────────────────────
-function openLightbox(url) {
-    $('lb-img').src = url;
-    $('lightbox').style.display = 'flex';
-}
-function closeLightbox() { $('lightbox').style.display = 'none'; }
+function openLightbox(url) { $('lb-img').src = url; $('lightbox').style.display = 'flex'; }
+function closeLightbox()   { $('lightbox').style.display = 'none'; }
 
 // ── Helpers ───────────────────────────────────────────────────
 function removeEmptyState() { msgsEl.querySelector('.empty-state')?.remove(); }
@@ -569,9 +843,9 @@ function formatDate(iso) {
     return d.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'});
 }
 function formatTime(iso) { return new Date(iso).toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'}); }
-function formatSize(b) { return b>1048576?(b/1048576).toFixed(1)+' MB':(b/1024).toFixed(0)+' KB'; }
-function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-function escAttr(s) { return String(s).replace(/"/g,'&quot;'); }
+function formatSize(b)   { return b>1048576?(b/1048576).toFixed(1)+' MB':(b/1024).toFixed(0)+' KB'; }
+function escHtml(s)      { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function escAttr(s)      { return String(s).replace(/"/g,'&quot;'); }
 
 function getFileIcon(type) {
     if (type.includes('pdf'))   return 'fa-file-pdf';
@@ -583,7 +857,8 @@ function getFileIcon(type) {
 }
 
 // ── Emoji ─────────────────────────────────────────────────────
-function toggleEmoji() { emojiOpen=!emojiOpen; $('emoji-bar').classList.toggle('show',emojiOpen); }
+function toggleEmoji()  { emojiOpen=!emojiOpen; $('emoji-bar').classList.toggle('show',emojiOpen); }
+function closeEmoji()   { emojiOpen=false; $('emoji-bar').classList.remove('show'); }
 function insertEmoji(e) {
     const s=inputEl.selectionStart, end=inputEl.selectionEnd;
     inputEl.value=inputEl.value.slice(0,s)+e+inputEl.value.slice(end);

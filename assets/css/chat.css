@@ -241,3 +241,34 @@ html,body{height:100%;font-family:'Inter',sans-serif;background:var(--bg);color:
   .chat-messages{padding:10px 10px 4px}
   .chat-input-area{padding:8px 10px 12px}
 }
+
+/* ── Read receipt ticks ──────────────────────────────────── */
+.msg-status{display:inline-flex;align-items:center;margin-left:5px;font-size:11px;color:rgba(255,255,255,.5);vertical-align:middle}
+.msg-status .fa-check,.msg-status .fa-check-double{font-size:11px}
+.msg-status .read{color:#60a5fa}
+
+/* ── Online dot ──────────────────────────────────────────── */
+.user-av-wrap{position:relative;flex-shrink:0}
+.online-dot{position:absolute;bottom:1px;right:1px;width:10px;height:10px;background:var(--green);border-radius:50%;border:2px solid var(--bg2)}
+
+/* user meta (time + badge) */
+.user-meta{flex-shrink:0;display:flex;flex-direction:column;align-items:flex-end;gap:4px}
+.user-time{font-size:10px;color:var(--muted)}
+
+/* ── Offline banner ──────────────────────────────────────── */
+.offline-banner{position:fixed;top:0;left:0;right:0;z-index:10000;background:#92400e;color:#fef3c7;text-align:center;padding:9px 16px;font-size:12.5px;font-weight:500;display:flex;align-items:center;justify-content:center;gap:8px;transform:translateY(-100%);transition:transform .3s;box-shadow:0 2px 12px rgba(0,0,0,.4)}
+.offline-banner.show{transform:translateY(0)}
+.offline-banner i{font-size:13px}
+
+/* ── Message video ───────────────────────────────────────── */
+.msg-video{max-width:240px;max-height:180px;border-radius:10px;display:block;margin-bottom:4px;background:#000}
+
+/* ── File size in file bubble ────────────────────────────── */
+.msg-file .fs{font-size:11px;color:var(--muted);margin-top:1px}
+
+/* ── Reply quote paragraph ───────────────────────────────── */
+.reply-quote p{color:var(--muted);font-size:12px;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px}
+.reply-quote.loading{opacity:.6;font-style:italic}
+
+/* ── msg-bubble status alignment ────────────────────────── */
+.msg-group.outgoing .msg-bubble{display:flex;flex-direction:column}
