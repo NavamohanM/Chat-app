@@ -7,7 +7,7 @@ $user = current_user();
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title><?= APP_NAME ?></title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -63,7 +63,9 @@ $user = current_user();
 <!-- ── Context Menu ──────────────────────────────────────── -->
 <div id="ctx-menu">
     <div class="ctx-item" onclick="ctxReply()"><i class="fa-solid fa-reply"></i> Reply</div>
-    <div class="ctx-item danger" onclick="ctxDelete()"><i class="fa-solid fa-trash"></i> Delete</div>
+    <div class="ctx-item edit-only" onclick="ctxEdit()" style="display:none"><i class="fa-solid fa-pen"></i> Edit</div>
+    <div class="ctx-item" onclick="ctxBlock()"><i class="fa-solid fa-ban"></i> <span id="ctx-block-label">Block User</span></div>
+    <div class="ctx-item danger" onclick="ctxDelete()" style="display:none"><i class="fa-solid fa-trash"></i> Delete</div>
 </div>
 
 <!-- ── Sidebar overlay ───────────────────────────────────── -->
@@ -102,6 +104,7 @@ $user = current_user();
             <div class="my-name"><?= htmlspecialchars($user['username']) ?></div>
             <div class="my-status">Online</div>
         </div>
+        <a href="settings.php" class="btn-icon" title="Settings"><i class="fa-solid fa-gear"></i></a>
         <a href="auth/logout.php" class="btn-icon" title="Sign Out"><i class="fa-solid fa-right-from-bracket"></i></a>
     </div>
 </aside>
@@ -132,11 +135,22 @@ $user = current_user();
                 <div class="chat-header-sub"  id="peer-sub">Online</div>
             </div>
             <div class="chat-header-actions">
+                <button class="btn-icon" id="btn-search-toggle" onclick="toggleSearchBar()" title="Search"><i class="fa-solid fa-magnifying-glass"></i></button>
                 <button class="btn-icon" onclick="startCall('voice')" title="Voice Call"><i class="fa-solid fa-phone"></i></button>
                 <button class="btn-icon" onclick="startCall('video')" title="Video Call"><i class="fa-solid fa-video"></i></button>
                 <button class="btn-icon" onclick="clearChat()"        title="Clear Chat"><i class="fa-solid fa-trash"></i></button>
             </div>
         </div>
+
+        <!-- Search bar -->
+        <div id="search-bar" style="display:none" class="chat-search-bar">
+            <i class="fa-solid fa-magnifying-glass"></i>
+            <input type="text" id="search-input-chat" placeholder="Search messages..." oninput="searchMessages(this.value)">
+            <button onclick="closeSearchBar()"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+
+        <!-- Search results overlay -->
+        <div id="search-results" style="display:none" class="search-results-panel"></div>
 
         <!-- Messages -->
         <div class="chat-messages" id="chat-messages"></div>
@@ -175,6 +189,9 @@ $user = current_user();
                 <button class="btn-emoji" onclick="toggleEmoji()"><i class="fa-regular fa-face-smile"></i></button>
                 <textarea id="msg-input" placeholder="Type a message..." rows="1"
                     oninput="autoResize(this);handleTyping()" onkeydown="handleKey(event)"></textarea>
+                <button class="btn-voice" id="btn-voice" onclick="startVoiceRecord()" title="Voice message">
+                    <i class="fa-solid fa-microphone"></i>
+                </button>
                 <button class="btn-send" id="btn-send" onclick="sendMessage()">
                     <i class="fa-solid fa-paper-plane"></i>
                 </button>
@@ -209,6 +226,7 @@ const CURRENT_USER   = {
 };
 const SUPABASE_URL      = <?= json_encode(SUPABASE_URL) ?>;
 const SUPABASE_ANON_KEY = <?= json_encode(SUPABASE_ANON_KEY) ?>;
+const CSRF_TOKEN        = <?= json_encode(csrf_token()) ?>;
 </script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="assets/js/chat.js"></script>

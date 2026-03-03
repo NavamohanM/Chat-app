@@ -1,12 +1,18 @@
 <?php
 require_once '../config.php';
-
+send_security_headers();
 if (is_logged_in()) redirect('../index.php');
 
-$errors = [];
+$errors  = [];
 $success = '';
+$token   = csrf_token();
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!hash_equals($token, $_POST['csrf_token'] ?? '')) {
+        $errors[] = 'Invalid request. Please try again.';
+        goto render;
+    }
+
     $username = trim($_POST['username'] ?? '');
     $email    = trim($_POST['email']    ?? '');
     $password = $_POST['password']      ?? '';
@@ -61,6 +67,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             if ($result['status'] === 201 && !empty($result['data'][0])) {
                 $user = $result['data'][0];
+                session_regenerate_id(true);
                 $_SESSION['user_id']      = $user['id'];
                 $_SESSION['username']     = $user['username'];
                 $_SESSION['email']        = $user['email'];
@@ -72,12 +79,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 }
+render:
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Register — <?= APP_NAME ?></title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -102,6 +110,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <?php endif; ?>
 
         <form method="POST" class="auth-form" novalidate>
+            <input type="hidden" name="csrf_token" value="<?= $token ?>">
             <div class="form-group">
                 <label for="username">Username</label>
                 <div class="input-wrapper">

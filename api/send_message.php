@@ -33,10 +33,9 @@ if ($file_type)$data['file_type'] = $file_type;
 $result = supabase_request('messages', 'POST', $data, true);
 
 if ($result['status'] === 201) {
-    // Update sender last_seen
     supabase_request('users?id=eq.' . $user['id'], 'PATCH', ['last_seen' => date('c')], true);
     echo json_encode(['success' => true, 'data' => $result['data'][0] ?? null]);
 } else {
     http_response_code(500);
-    echo json_encode(['error' => 'Failed to send', 'detail' => $result['data']]);
+    echo json_encode(['error' => 'Failed to send message']);
 }

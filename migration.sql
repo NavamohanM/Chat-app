@@ -67,3 +67,22 @@ create policy "Anyone can update calls" on calls
 
 -- Enable realtime on calls table
 alter publication supabase_realtime add table calls;
+
+-- ============================================================
+-- Message edit support
+-- ============================================================
+alter table messages add column if not exists edited_at timestamp with time zone;
+
+-- ============================================================
+-- BLOCKED USERS TABLE
+-- ============================================================
+create table if not exists blocked_users (
+  id         uuid primary key default uuid_generate_v4(),
+  user_id    uuid references users(id) on delete cascade not null,
+  blocked_id uuid references users(id) on delete cascade not null,
+  created_at timestamp with time zone default now(),
+  unique(user_id, blocked_id)
+);
+
+alter table blocked_users enable row level security;
+create policy "Users manage own blocks" on blocked_users for all using (true);

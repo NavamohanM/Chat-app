@@ -5,6 +5,12 @@ header('Content-Type: application/json');
 if (!is_logged_in()) { http_response_code(401); echo json_encode(['error'=>'Unauthorized']); exit; }
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') { http_response_code(405); exit; }
 
+// Rate limit: 20 uploads per hour per user
+$user = current_user();
+if (!rate_limit('upload_' . $user['id'], 20, 3600)) {
+    http_response_code(429); echo json_encode(['error'=>'Too many uploads. Please wait.']); exit;
+}
+
 if (empty($_FILES['file'])) {
     http_response_code(400); echo json_encode(['error'=>'No file uploaded']); exit;
 }
@@ -50,13 +56,14 @@ curl_close($ch);
 if ($httpCode === 200 || $httpCode === 201) {
     $publicUrl = SUPABASE_URL . '/storage/v1/object/public/chat-media/' . $filename;
     echo json_encode([
-        'success'   => true,
-        'url'       => $publicUrl,
-        'name'      => $file['name'],
-        'type'      => $mime,
-        'size'      => $file['size'],
+        'success' => true,
+        'url'     => $publicUrl,
+        'name'    => $file['name'],
+        'type'    => $mime,
+        'size'    => $file['size'],
     ]);
 } else {
+    error_log('[Upload failed] HTTP ' . $httpCode . ' → ' . $resp);
     http_response_code(500);
-    echo json_encode(['error' => 'Upload failed', 'detail' => $resp]);
+    echo json_encode(['error' => 'Upload failed. Please try again.']);
 }

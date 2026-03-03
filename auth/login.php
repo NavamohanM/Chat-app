@@ -1,44 +1,49 @@
 <?php
 require_once '../config.php';
-
+send_security_headers();
 if (is_logged_in()) redirect('../index.php');
 
 $errors = [];
+$token  = csrf_token();
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $login    = trim($_POST['login']    ?? '');
-    $password = $_POST['password']      ?? '';
+    // Rate limit by IP
+    login_rate_limit();
 
-    if (empty($login) || empty($password)) {
-        $errors[] = 'Please fill in all fields.';
+    // CSRF check
+    if (!hash_equals($token, $_POST['csrf_token'] ?? '')) {
+        $errors[] = 'Invalid request. Please try again.';
     } else {
-        // Find by username or email
-        $isEmail  = filter_var($login, FILTER_VALIDATE_EMAIL);
-        $field    = $isEmail ? 'email' : 'username';
-        $result   = supabase_request(
-            'users?' . $field . '=eq.' . urlencode($login) . '&limit=1',
-            'GET', [], true
-        );
+        $login    = trim($_POST['login']    ?? '');
+        $password = $_POST['password']      ?? '';
 
-        if (!empty($result['data'][0])) {
-            $user = $result['data'][0];
-            if (password_verify($password, $user['password_hash'])) {
+        if (empty($login) || empty($password)) {
+            $errors[] = 'Please fill in all fields.';
+        } else {
+            $isEmail = filter_var($login, FILTER_VALIDATE_EMAIL);
+            $field   = $isEmail ? 'email' : 'username';
+            $result  = supabase_request(
+                'users?' . $field . '=eq.' . urlencode($login) . '&limit=1',
+                'GET', [], true
+            );
+
+            $user = $result['data'][0] ?? null;
+
+            // Always run password_verify to prevent timing attacks
+            $hash  = $user['password_hash'] ?? '$2y$10$invaliddummyhashXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
+            $valid = password_verify($password, $hash);
+
+            if ($user && $valid) {
+                session_regenerate_id(true); // Prevent session fixation
                 $_SESSION['user_id']      = $user['id'];
                 $_SESSION['username']     = $user['username'];
                 $_SESSION['email']        = $user['email'];
                 $_SESSION['avatar_color'] = $user['avatar_color'];
-
-                // Update last_seen
-                supabase_request('users?id=eq.' . $user['id'], 'PATCH', [
-                    'last_seen' => date('c'),
-                ], true);
-
+                supabase_request('users?id=eq.' . $user['id'], 'PATCH', ['last_seen' => date('c')], true);
                 redirect('../index.php');
             } else {
                 $errors[] = 'Invalid username or password.';
             }
-        } else {
-            $errors[] = 'Invalid username or password.';
         }
     }
 }
@@ -47,7 +52,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Login — <?= APP_NAME ?></title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -72,6 +77,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <?php endif; ?>
 
         <form method="POST" class="auth-form">
+            <input type="hidden" name="csrf_token" value="<?= $token ?>">
             <div class="form-group">
                 <label for="login">Username or Email</label>
                 <div class="input-wrapper">

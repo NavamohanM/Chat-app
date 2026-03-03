@@ -5,6 +5,14 @@
 const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ── State ─────────────────────────────────────────────────────
+let blockedUsers  = new Set();
+let mediaRecorder = null;
+let audioChunks   = [];
+let isRecording   = false;
+let loadingOlder  = false;
+let hasMoreMsgs   = true;
+let oldestMsgTs   = null;
+let searchTimer   = null;
 let activePeer    = null;
 let messages      = [];
 let lastDate      = null;
@@ -40,10 +48,27 @@ const replyBar      = $('reply-bar');
 const typingBar     = $('typing-bar');
 const ctxMenu       = $('ctx-menu');
 
+// ── Jump-to-latest button ─────────────────────────────────────
+let jumpBtn = null;
+function setupJumpBtn() {
+    if (jumpBtn) return;
+    jumpBtn = document.createElement('button');
+    jumpBtn.id = 'jump-latest';
+    jumpBtn.className = 'jump-latest-btn';
+    jumpBtn.innerHTML = '<i class="fa-solid fa-chevron-down"></i>';
+    jumpBtn.onclick = () => { scrollToBottom(true); jumpBtn.style.display = 'none'; };
+    document.querySelector('.chat-view')?.appendChild(jumpBtn);
+    msgsEl.addEventListener('scroll', () => {
+        const distFromBottom = msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight;
+        if (jumpBtn) jumpBtn.style.display = distFromBottom > 200 ? 'flex' : 'none';
+    });
+}
+
 // ── Init ──────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
     loadOfflineQueue();
     loadUnreadCounts();
+    loadBlockedUsers();
     loadUsers();
     subscribeRealtime();
     subscribeBroadcast();
@@ -231,44 +256,150 @@ async function openChat(id, username, color) {
     chatView.style.display      = 'flex';
 
     messages  = []; lastDate = null; lastGroup = null; lastMsgTs = null;
+    oldestMsgTs = null; hasMoreMsgs = true;
     msgsEl.innerHTML = '<div class="msgs-loading"><i class="fa-solid fa-spinner fa-spin"></i></div>';
     cancelReply();
     clearUnread(id);
     closeSidebar();
 
     await loadMessages();
-
-    // Mark all received messages from this peer as read
     markRead(id);
-
+    setupJumpBtn();
     inputEl.focus();
 }
 
 // ── Load messages ─────────────────────────────────────────────
+const MSG_PAGE = 30;
 async function loadMessages() {
     if (!activePeer) return;
     try {
-        const res  = await fetch(`api/fetch_messages.php?with=${activePeer.id}&limit=60`);
+        const res  = await fetch(`api/fetch_messages.php?with=${activePeer.id}&limit=${MSG_PAGE}`);
         const json = await res.json();
         msgsEl.innerHTML = '';
         if (!json.success) { msgsEl.innerHTML = '<div class="msgs-error">Failed to load.</div>'; return; }
         if (!json.data.length) {
+            hasMoreMsgs = false;
             msgsEl.innerHTML = `<div class="empty-state"><i class="fa-regular fa-comment-dots"></i><p>Say hi to ${escHtml(activePeer.username)}!</p></div>`;
             return;
         }
+        if (json.data.length < MSG_PAGE) hasMoreMsgs = false;
         json.data.forEach(m => appendMessage(m, false));
-        lastMsgTs = json.data[json.data.length - 1].created_at;
+        lastMsgTs   = json.data[json.data.length - 1].created_at;
+        oldestMsgTs = json.data[0].created_at;
         scrollToBottom(false);
+        // Set up infinite scroll
+        setupInfiniteScroll();
     } catch(e) {
         msgsEl.innerHTML = '<div class="msgs-error">Connection error.</div>';
     }
+}
+
+// ── Infinite scroll (load older messages) ────────────────────
+function setupInfiniteScroll() {
+    msgsEl.onscroll = async () => {
+        if (msgsEl.scrollTop > 80) return;
+        if (loadingOlder || !hasMoreMsgs || !oldestMsgTs) return;
+        loadingOlder = true;
+        const indicator = document.createElement('div');
+        indicator.className = 'load-older';
+        indicator.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Loading older messages...';
+        msgsEl.prepend(indicator);
+        try {
+            const res  = await fetch(`api/fetch_messages.php?with=${activePeer.id}&limit=${MSG_PAGE}&before=${encodeURIComponent(oldestMsgTs)}`);
+            const json = await res.json();
+            indicator.remove();
+            if (!json.success || !json.data.length) { hasMoreMsgs = false; loadingOlder = false; return; }
+            if (json.data.length < MSG_PAGE) hasMoreMsgs = false;
+            // Prepend older messages (save scroll position)
+            const prevHeight = msgsEl.scrollHeight;
+            const saved = { lastDate, lastGroup };
+            lastDate = null; lastGroup = null;
+            const frag = document.createDocumentFragment();
+            const tempEl = document.createElement('div');
+            json.data.forEach(m => {
+                messages.unshift(m);
+                appendOldMessage(m, tempEl);
+            });
+            while (tempEl.firstChild) frag.appendChild(tempEl.firstChild);
+            msgsEl.prepend(frag);
+            // Restore scroll
+            msgsEl.scrollTop = msgsEl.scrollHeight - prevHeight;
+            oldestMsgTs = json.data[0].created_at;
+            // Restore last group state
+            lastDate  = saved.lastDate;
+            lastGroup = saved.lastGroup;
+        } catch(e) { indicator.remove(); }
+        loadingOlder = false;
+    };
+}
+
+function appendOldMessage(msg, container) {
+    const isOwn   = msg.user_id === CURRENT_USER.id;
+    const dir     = isOwn ? 'outgoing' : 'incoming';
+    const group   = document.createElement('div');
+    group.className = `msg-group ${dir}`;
+    group.appendChild(makeBubble(msg, isOwn));
+    const timeEl = document.createElement('div');
+    timeEl.className   = 'msg-time';
+    timeEl.textContent = formatTime(msg.created_at);
+    group.appendChild(timeEl);
+    container.appendChild(group);
+}
+
+// ── Message search ────────────────────────────────────────────
+function toggleSearchBar() {
+    const bar = $('search-bar');
+    const isOpen = bar.style.display !== 'none';
+    bar.style.display = isOpen ? 'none' : 'flex';
+    if (!isOpen) $('search-input-chat').focus();
+    else closeSearchBar();
+}
+function closeSearchBar() {
+    $('search-bar').style.display = 'none';
+    $('search-results').style.display = 'none';
+    $('search-input-chat').value = '';
+}
+function searchMessages(q) {
+    clearTimeout(searchTimer);
+    if (q.length < 2) { $('search-results').style.display = 'none'; return; }
+    searchTimer = setTimeout(async () => {
+        try {
+            const res  = await fetch(`api/search_messages.php?q=${encodeURIComponent(q)}&with=${activePeer?.id || ''}`);
+            const json = await res.json();
+            renderSearchResults(json.data || [], q);
+        } catch(e) {}
+    }, 300);
+}
+function renderSearchResults(results, q) {
+    const panel = $('search-results');
+    if (!results.length) {
+        panel.innerHTML = `<div class="sr-empty"><i class="fa-solid fa-search"></i> No messages found for "<strong>${escHtml(q)}</strong>"</div>`;
+        panel.style.display = 'block';
+        return;
+    }
+    const hl = text => text.replace(new RegExp('(' + q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi'), '<mark>$1</mark>');
+    panel.innerHTML = results.map(m => `
+        <div class="sr-item" onclick="jumpToMessage('${m.id}')">
+            <div class="sr-meta">
+                <strong>${escHtml(m.username)}</strong>
+                <span>${formatDate(m.created_at)} ${formatTime(m.created_at)}</span>
+            </div>
+            <div class="sr-text">${hl(escHtml(m.message || '📎 File'))}</div>
+        </div>
+    `).join('');
+    panel.style.display = 'block';
+}
+function jumpToMessage(id) {
+    closeSearchBar();
+    const el = document.querySelector(`[data-id="${id}"]`);
+    if (el) { el.scrollIntoView({behavior:'smooth',block:'center'}); el.classList.add('highlight'); setTimeout(() => el.classList.remove('highlight'), 2000); }
 }
 
 // ── Mark messages as read ─────────────────────────────────────
 async function markRead(fromId) {
     try {
         await fetch('api/mark_read.php', {
-            method: 'POST', headers: {'Content-Type':'application/json'},
+            method: 'POST', headers: {'Content-Type':'application/json','X-CSRF-Token':CSRF_TOKEN},
             body: JSON.stringify({ from_id: fromId })
         });
         // Update status icons for messages we sent (now marked read on their side)
@@ -365,6 +496,17 @@ function onUpdateMessage(payload) {
         return;
     }
 
+    // Edited
+    if (msg.edited_at && el) {
+        const textEl = el.querySelector('.msg-text');
+        if (textEl) textEl.textContent = msg.message || '';
+        if (!el.querySelector('.edited-mark')) {
+            const mark = document.createElement('span');
+            mark.className = 'edited-mark'; mark.textContent = 'edited';
+            el.appendChild(mark);
+        }
+    }
+
     // Status update (sent → delivered → read)
     if (msg.status && el) {
         updateStatusTick(el, msg.status);
@@ -442,7 +584,7 @@ async function sendMessage() {
     autoResize(inputEl);
     sendBtn.disabled = true;
 
-    const tempId = 'temp_' + Date.now();
+    const tempId = 'temp_' + (crypto.randomUUID ? crypto.randomUUID() : Date.now());
     const tempMsg = {
         id: tempId, user_id: CURRENT_USER.id,
         receiver_id: activePeer.id, username: CURRENT_USER.username,
@@ -471,7 +613,7 @@ async function sendMessage() {
 
     try {
         const res  = await fetch('api/send_message.php', {
-            method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
+            method: 'POST', headers: {'Content-Type':'application/json','X-CSRF-Token':CSRF_TOKEN}, body: JSON.stringify(body)
         });
         const json = await res.json();
         if (json.success && json.data) {
@@ -534,8 +676,8 @@ async function sendFile() {
     scrollToBottom(true);
 
     try {
-        const upRes  = await fetch('api/upload.php', { method: 'POST', body: formData });
-        const upJson = await upRes.json();
+        // Upload with XHR for progress tracking
+        const upJson = await uploadWithProgress(formData, tempId);
         if (!upJson.success) throw new Error(upJson.error);
 
         const body = {
@@ -546,7 +688,7 @@ async function sendFile() {
             file_type:   upJson.type,
         };
         const res  = await fetch('api/send_message.php', {
-            method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
+            method: 'POST', headers: {'Content-Type':'application/json','X-CSRF-Token':CSRF_TOKEN}, body: JSON.stringify(body)
         });
         const json = await res.json();
         if (json.success && json.data) {
@@ -561,6 +703,27 @@ async function sendFile() {
         const el = document.querySelector(`[data-id="${tempId}"]`);
         if (el) el.classList.add('failed');
     }
+}
+
+// ── Upload with progress ──────────────────────────────────────
+function uploadWithProgress(formData, tempId) {
+    return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', 'api/upload.php');
+        xhr.setRequestHeader('X-CSRF-Token', CSRF_TOKEN);
+        xhr.upload.onprogress = e => {
+            if (!e.lengthComputable) return;
+            const pct = Math.round(e.loaded / e.total * 100);
+            const el  = document.querySelector(`[data-id="${tempId}"] .upload-progress`);
+            if (el) el.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Uploading ${pct}%`;
+        };
+        xhr.onload  = () => {
+            try { resolve(JSON.parse(xhr.responseText)); }
+            catch(e) { reject(new Error('Upload parse error')); }
+        };
+        xhr.onerror = () => reject(new Error('Network error'));
+        xhr.send(formData);
+    });
 }
 
 // ── Render message ────────────────────────────────────────────
@@ -628,10 +791,12 @@ function makeBubble(msg, isOwn) {
         fetchReplyData(msg.reply_to, b);
     }
 
-    // File / image
+    // File / image / audio
     if (msg.file_url) {
         if (msg.file_type && msg.file_type.startsWith('image/')) {
             html += `<img class="msg-img" src="${escAttr(msg.file_url)}" alt="image" onclick="openLightbox('${escAttr(msg.file_url)}')">`;
+        } else if (msg.file_type && msg.file_type.startsWith('audio/')) {
+            html += `<div class="msg-audio"><i class="fa-solid fa-microphone"></i><audio controls src="${escAttr(msg.file_url)}"></audio></div>`;
         } else if (msg.file_type && msg.file_type.startsWith('video/')) {
             html += `<video class="msg-video" controls src="${escAttr(msg.file_url)}"></video>`;
         } else {
@@ -644,7 +809,7 @@ function makeBubble(msg, isOwn) {
         }
     }
 
-    if (msg.message) html += `<span class="msg-text">${escHtml(msg.message)}</span>`;
+    if (msg.message) html += `<span class="msg-text">${escHtml(msg.message)}</span>${msg.edited_at ? '<span class="edited-mark">edited</span>' : ''}`;
     if (msg._uploading) html += '<span class="upload-progress"><i class="fa-solid fa-spinner fa-spin"></i> Uploading...</span>';
 
     // Status tick for own messages
@@ -689,9 +854,16 @@ function showCtxMenu(e, msgId, isOwn) {
     ctxMenu.style.display = 'block';
     const x = e.clientX ?? e.pageX ?? 0;
     const y = e.clientY ?? e.pageY ?? 0;
-    ctxMenu.style.left    = Math.min(x, window.innerWidth - 160) + 'px';
-    ctxMenu.style.top     = Math.min(y, window.innerHeight - 90) + 'px';
-    ctxMenu.querySelector('.danger').style.display = isOwn ? 'flex' : 'none';
+    ctxMenu.style.left = Math.min(x, window.innerWidth  - 170) + 'px';
+    ctxMenu.style.top  = Math.min(y, window.innerHeight - 130) + 'px';
+    // Show/hide options based on ownership
+    ctxMenu.querySelector('.danger').style.display    = isOwn ? 'flex' : 'none';
+    ctxMenu.querySelector('.edit-only').style.display = isOwn ? 'flex' : 'none';
+    // Block label
+    const blockLabel = $('ctx-block-label');
+    if (blockLabel && activePeer) {
+        blockLabel.textContent = blockedUsers.has(activePeer.id) ? 'Unblock User' : 'Block User';
+    }
 }
 
 function ctxReply() {
@@ -707,13 +879,67 @@ function ctxReply() {
 
 function cancelReply() { replyTo = null; replyBar.style.display = 'none'; }
 
+// ── Edit message ──────────────────────────────────────────────
+function ctxEdit() {
+    const msg = messages.find(m => m.id === ctxMsgId);
+    if (!msg || !msg.message) return;
+    ctxMenu.style.display = 'none';
+    const newText = prompt('Edit message:', msg.message);
+    if (!newText || newText.trim() === msg.message) return;
+    fetch('api/edit_message.php', {
+        method: 'POST', headers: {'Content-Type':'application/json','X-CSRF-Token':CSRF_TOKEN},
+        body: JSON.stringify({ message_id: ctxMsgId, message: newText.trim() })
+    }).then(r => r.json()).then(json => {
+        if (json.success) {
+            const el = document.querySelector(`[data-id="${ctxMsgId}"] .msg-text`);
+            if (el) { el.textContent = newText.trim(); }
+            const idx = messages.findIndex(m => m.id === ctxMsgId);
+            if (idx !== -1) { messages[idx].message = newText.trim(); messages[idx].edited_at = new Date().toISOString(); }
+            // Add edited marker
+            const bubble = document.querySelector(`[data-id="${ctxMsgId}"]`);
+            if (bubble && !bubble.querySelector('.edited-mark')) {
+                const mark = document.createElement('span');
+                mark.className = 'edited-mark';
+                mark.textContent = 'edited';
+                bubble.appendChild(mark);
+            }
+        } else { showToast(json.error || 'Cannot edit', ''); }
+    }).catch(() => showToast('Failed to edit', ''));
+}
+
+// ── Block / unblock user ──────────────────────────────────────
+async function loadBlockedUsers() {
+    try {
+        const res  = await fetch('api/block_user.php?action=list');
+        const json = await res.json();
+        if (json.success) blockedUsers = new Set(json.data || []);
+    } catch(e) {}
+}
+
+function ctxBlock() {
+    if (!activePeer) return;
+    ctxMenu.style.display = 'none';
+    const isBlocked = blockedUsers.has(activePeer.id);
+    if (!confirm(isBlocked ? `Unblock ${activePeer.username}?` : `Block ${activePeer.username}? You won't receive their messages.`)) return;
+    const action = isBlocked ? 'unblock' : 'block';
+    fetch('api/block_user.php', {
+        method: 'POST', headers: {'Content-Type':'application/json','X-CSRF-Token':CSRF_TOKEN},
+        body: JSON.stringify({ action, target_id: activePeer.id })
+    }).then(r => r.json()).then(json => {
+        if (json.success) {
+            if (action === 'block') { blockedUsers.add(activePeer.id); showToast(`Blocked ${activePeer.username}`, ''); }
+            else { blockedUsers.delete(activePeer.id); showToast(`Unblocked ${activePeer.username}`, 'connected'); }
+        }
+    });
+}
+
 async function ctxDelete() {
     if (!ctxMsgId) return;
     if (!confirm('Delete this message?')) return;
     ctxMenu.style.display = 'none';
     try {
         await fetch('api/delete_message.php', {
-            method: 'POST', headers: {'Content-Type':'application/json'},
+            method: 'POST', headers: {'Content-Type':'application/json','X-CSRF-Token':CSRF_TOKEN},
             body: JSON.stringify({ message_id: ctxMsgId })
         });
         const el = document.querySelector(`[data-id="${ctxMsgId}"]`);
@@ -728,11 +954,70 @@ async function clearChat() {
     const mine = messages.filter(m => m.user_id === CURRENT_USER.id);
     await Promise.all(mine.map(m =>
         fetch('api/delete_message.php', {
-            method: 'POST', headers: {'Content-Type':'application/json'},
+            method: 'POST', headers: {'Content-Type':'application/json','X-CSRF-Token':CSRF_TOKEN},
             body: JSON.stringify({ message_id: m.id })
         })
     ));
     await loadMessages();
+}
+
+// ── Voice message recording ───────────────────────────────────
+async function startVoiceRecord() {
+    if (isRecording) { stopVoiceRecord(); return; }
+    if (!activePeer) return;
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks   = [];
+        isRecording   = true;
+        mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+        mediaRecorder.onstop = async () => {
+            stream.getTracks().forEach(t => t.stop());
+            const blob     = new Blob(audioChunks, { type: 'audio/webm' });
+            const formData = new FormData();
+            formData.append('file', blob, 'voice_' + Date.now() + '.webm');
+            const tempId  = 'temp_' + (crypto.randomUUID ? crypto.randomUUID() : Date.now());
+            const tempMsg = {
+                id: tempId, user_id: CURRENT_USER.id, receiver_id: activePeer.id,
+                username: CURRENT_USER.username, message: '🎤 Voice message',
+                created_at: new Date().toISOString(), _pending: true, _uploading: true,
+                file_type: 'audio/webm', file_name: 'Voice message', status: 'sent',
+            };
+            removeEmptyState();
+            appendMessage(tempMsg, true);
+            scrollToBottom(true);
+            try {
+                const upJson = await uploadWithProgress(formData, tempId);
+                if (!upJson.success) throw new Error(upJson.error);
+                const body = { message: '', receiver_id: activePeer.id, file_url: upJson.url, file_name: 'Voice message', file_type: 'audio/webm' };
+                const res  = await fetch('api/send_message.php', { method:'POST', headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF_TOKEN}, body: JSON.stringify(body) });
+                const json = await res.json();
+                if (json.success && json.data) {
+                    const idx = messages.findIndex(m => m.id === tempId);
+                    if (idx !== -1) messages[idx] = json.data;
+                    const el = document.querySelector(`[data-id="${tempId}"]`);
+                    if (el) { el.setAttribute('data-id', json.data.id); el.classList.remove('pending','uploading'); refreshBubble(el, json.data); }
+                }
+                playSound('send');
+            } catch(e) {
+                const el = document.querySelector(`[data-id="${tempId}"]`);
+                if (el) el.classList.add('failed');
+            }
+        };
+        mediaRecorder.start();
+        const btn = $('btn-voice');
+        if (btn) { btn.classList.add('recording'); btn.title = 'Stop recording'; }
+        showToast('Recording... tap again to send', '');
+    } catch(e) {
+        showToast('Cannot access microphone', '');
+    }
+}
+function stopVoiceRecord() {
+    if (!mediaRecorder || !isRecording) return;
+    isRecording = false;
+    mediaRecorder.stop();
+    const btn = $('btn-voice');
+    if (btn) { btn.classList.remove('recording'); btn.title = 'Voice message'; }
 }
 
 // ── Typing indicator ──────────────────────────────────────────

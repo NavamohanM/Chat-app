@@ -12,7 +12,7 @@ $before   = $_GET['before'] ?? null;
 
 if (!$other_id) { http_response_code(400); echo json_encode(['error'=>'Missing ?with=']); exit; }
 
-$fields = 'id,user_id,username,message,created_at,receiver_id,file_url,file_name,file_type,reply_to,deleted_at,status,read_at';
+$fields = 'id,user_id,username,message,created_at,receiver_id,file_url,file_name,file_type,reply_to,deleted_at';
 $extra  = '';
 if ($after)  $extra .= '&created_at=gt.' . urlencode($after);
 if ($before) $extra .= '&created_at=lt.' . urlencode($before);
@@ -44,25 +44,12 @@ if (!empty($replyIds)) {
     }
 }
 
-// Attach reply data and mark incoming messages as delivered
-$unreadIds = [];
+// Attach reply data
 foreach ($all as &$msg) {
     if ($msg['reply_to'] && isset($replyMap[$msg['reply_to']])) {
         $msg['_replyData'] = $replyMap[$msg['reply_to']];
     }
-    // Mark messages sent to me as delivered if still 'sent'
-    if ($msg['receiver_id'] === $me['id'] && ($msg['status'] === 'sent' || !$msg['status'])) {
-        $unreadIds[] = $msg['id'];
-        $msg['status'] = 'delivered';
-    }
 }
 unset($msg);
-
-// Batch mark as delivered
-if (!empty($unreadIds)) {
-    foreach ($unreadIds as $uid) {
-        supabase_request('messages?id=eq.' . $uid, 'PATCH', ['status' => 'delivered'], true);
-    }
-}
 
 echo json_encode(['success' => true, 'data' => $all]);
