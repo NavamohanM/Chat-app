@@ -8,7 +8,10 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 COPY . /app
 
-RUN mkdir -p /tmp/chatapp_sessions /tmp/chatapp_rl && chmod 777 /tmp/chatapp_sessions /tmp/chatapp_rl
+RUN mkdir -p /tmp/chatapp_sessions /tmp/chatapp_rl \
+    && chmod 777 /tmp/chatapp_sessions /tmp/chatapp_rl
 
-EXPOSE 8080
-CMD ["/bin/sh", "-c", "php -S 0.0.0.0:${PORT:-8080} -t /app"]
+COPY start.sh /start.sh
+RUN chmod +x /start.sh
+
+CMD ["/start.sh"]
