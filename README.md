@@ -1,102 +1,153 @@
-# Chat Application
+# ChatApp — WhatsApp Clone
 
-This repository contains the source code for a **Chat Application**, developed using **HTML**, **CSS**, **JavaScript**, **PHP**, and **XAMPP** for back-end server integration. The application demonstrates real-time messaging functionality and provides a user-friendly interface for chat interactions.
+A full-featured real-time chat application built with PHP and Supabase, inspired by WhatsApp.
 
-## Features
-
-- **User Authentication**: Secure login and registration system.
-- **Real-time Messaging**: Send and receive messages in real-time.
-- **Responsive Design**: Works seamlessly across devices.
-- **Database Integration**: Uses MySQL for storing user data and messages.
-
-## Tech Stack
-
-- **Front-End**: HTML, CSS, JavaScript
-- **Back-End**: PHP
-- **Database**: MySQL (via XAMPP)
-- **Environment**: XAMPP (Apache + MySQL)
-
-## Setup Instructions
-
-Follow these steps to set up and run the project locally:
-
-### Prerequisites
-
-1. Install [XAMPP](https://www.apachefriends.org/index.html) on your system.
-2. Clone this repository to your local machine.
-
-```bash
-git clone https://github.com/yourusername/chat-application.git
-cd chat-application
-```
-
-### Configuration
-
-1. **Database Setup**:
-   - Open the XAMPP Control Panel and start Apache and MySQL.
-   - Access `phpMyAdmin` by visiting `http://localhost/phpmyadmin` in your browser.
-   - Create a new database (e.g., `chat_app`) and import the provided SQL file (`database/chat_app.sql`) located in the repository.
-
-2. **Update Configuration**:
-   - Edit the `config.php` file in the project root and update the database credentials:
-
-```php
-<?php
-$host = 'localhost';
-$user = 'root';
-$password = ''; // Default password for XAMPP
-$dbname = 'chat_app';
-?>
-```
-
-### Running the Application
-
-1. Place the project folder in the `htdocs` directory of your XAMPP installation (e.g., `C:/xampp/htdocs/chat-application`).
-2. Open your browser and navigate to `http://localhost/chat-application`.
-3. Use the application to register new users and start chatting!
-
-## Folder Structure
-
-```
-chat-application/
-├── css/                # Stylesheets
-├── js/                 # JavaScript files
-├── includes/           # PHP includes (e.g., database connection, utilities)
-├── database/           # Database setup files (SQL scripts)
-├── index.php           # Entry point for the application
-├── login.php           # Login functionality
-├── register.php        # Registration functionality
-├── chat.php            # Chat interface
-├── config.php          # Database configuration
-└── README.md           # Project documentation
-```
-
-## Screenshots
-
-Add screenshots of your project here to showcase the UI and functionality.
-
-## Future Enhancements
-
-- Add support for file sharing (images, documents, etc.).
-- Enhance security with password hashing and input validation.
-- Implement user presence indicators (online/offline status).
-- Introduce group chat functionality.
-
-## Contributing
-
-Contributions are welcome! Please fork this repository and create a pull request for any enhancements or bug fixes.
-
-## License
-
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+![PHP](https://img.shields.io/badge/PHP-8.3-777BB4?style=flat&logo=php)
+![Supabase](https://img.shields.io/badge/Supabase-PostgreSQL-3ECF8E?style=flat&logo=supabase)
+![JavaScript](https://img.shields.io/badge/JavaScript-Vanilla-F7DF1E?style=flat&logo=javascript)
+![License](https://img.shields.io/badge/License-MIT-blue.svg)
 
 ---
 
-Feel free to contact me for any queries or suggestions.
+## Features
+
+- **Real-time Messaging** — Instant delivery via Supabase WebSocket + broadcast channels
+- **Voice & Video Calls** — WebRTC peer-to-peer calls with STUN servers
+- **Voice Messages** — Record and send audio messages
+- **File Sharing** — Upload and share images, videos, PDFs, documents (up to 25MB)
+- **Message Reactions** — Emoji reactions persisted to database
+- **Reply & Forward** — Reply to specific messages, forward to any user
+- **Edit & Delete** — Edit sent messages, delete for everyone
+- **Read Receipts** — Single tick (sent), double grey tick (delivered), blue tick (read)
+- **Typing Indicators** — Live typing status
+- **Online / Last Seen** — Real-time presence detection
+- **Message Search** — Search messages within any conversation
+- **Link Previews** — Auto-fetch Open Graph previews for URLs
+- **Browser Notifications** — Native OS notifications when tab is in background
+- **Emoji Picker** — Built-in emoji bar
+- **Drag & Drop / Paste** — Drag files or paste images directly into chat
+- **Infinite Scroll** — Load older messages on scroll
+- **Offline Queue** — Messages queued and sent when connection restores
+- **Block / Unblock** — Block users from messaging you
+- **Clear Chat** — Clear entire conversation history
+- **Dark Theme UI** — Discord/Telegram-style dark interface
+- **Settings** — Change username, avatar color, password, sound & notification preferences
+- **Call History** — View past voice and video calls
+- **Mobile Responsive** — Works on all screen sizes
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Backend | PHP 8.3 (no framework) |
+| Database | Supabase (PostgreSQL) |
+| Real-time | Supabase WebSocket (`postgres_changes` + Broadcast) |
+| File Storage | Supabase Storage |
+| Frontend | Vanilla JavaScript, HTML5, CSS3 |
+| Calls | WebRTC (STUN servers) |
+| Fonts | Inter (Google Fonts) |
+| Icons | Font Awesome 6.4 |
+
+---
+
+## Project Structure
+
+```
+Chat-app/
+├── api/
+│   ├── send_message.php      # Send a message
+│   ├── fetch_messages.php    # Load messages
+│   ├── upload.php            # File upload to Supabase Storage
+│   ├── call.php              # WebRTC call signaling
+│   ├── call_history.php      # Call log
+│   ├── reactions.php         # Emoji reactions (toggle)
+│   ├── mark_read.php         # Mark messages as read
+│   ├── edit_message.php      # Edit a message
+│   ├── delete_message.php    # Soft delete a message
+│   ├── clear_chat.php        # Clear conversation
+│   ├── block_user.php        # Block / unblock user
+│   ├── reply_data.php        # Fetch reply quote data
+│   ├── search_messages.php   # Search messages
+│   ├── link_preview.php      # Fetch URL Open Graph data
+│   ├── typing.php            # Typing indicator + last seen
+│   ├── users.php             # User list
+│   ├── me.php                # Current user info
+│   └── update_profile.php    # Update username / password / avatar
+├── assets/
+│   ├── css/
+│   │   ├── chat.css          # Main chat UI styles
+│   │   ├── auth.css          # Login / register styles
+│   │   └── settings.css      # Settings page styles
+│   └── js/
+│       ├── chat.js           # Main chat logic + real-time
+│       └── call.js           # WebRTC voice & video calls
+├── auth/
+│   ├── login.php             # Login page
+│   ├── register.php          # Register page
+│   └── logout.php            # Logout
+├── index.php                 # Main chat UI
+├── settings.php              # Settings page
+├── config.php                # Supabase config + helpers
+├── schema.sql                # Database schema (run once in Supabase)
+└── migration.sql             # Additional migrations
+```
+
+---
+
+## Setup & Run Locally
+
+### 1. Prerequisites
+- PHP 8.0+ with `curl` extension
+- A free [Supabase](https://supabase.com) account
+
+### 2. Clone the repository
+```bash
+git clone https://github.com/NavamohanM/Chat-app.git
+cd Chat-app
+```
+
+### 3. Set up Supabase
+1. Create a new project at [supabase.com](https://supabase.com)
+2. Go to **SQL Editor** and run `schema.sql`
+3. Then run these critical commands:
+```sql
+alter table messages replica identity full;
+alter table calls    replica identity full;
+```
+4. Go to **Storage** → create a bucket named `chat-media` → set it to **Public**
+
+### 4. Configure the app
+Edit `config.php` and fill in your Supabase credentials:
+```php
+define('SUPABASE_URL',         'https://your-project.supabase.co');
+define('SUPABASE_ANON_KEY',    'your-anon-key');
+define('SUPABASE_SERVICE_KEY', 'your-service-role-key');
+```
+
+### 5. Run locally
+```bash
+php -S localhost:8000
+```
+Open [http://localhost:8000](http://localhost:8000) in your browser.
+
+---
+
+## Screenshots
+
+> Register → Login → Chat in real-time with voice/video calls, file sharing, reactions and more.
+
+---
 
 ## Author
 
 **Navamohan M**
+- GitHub: [@NavamohanM](https://github.com/NavamohanM)
+- Email: navamohan5219@gmail.com
 
-- GitHub: https://github.com/NavamohanM/
-- Email:navamohan5219@gmail.com
+---
+
+## License
+
+This project is licensed under the MIT License.
