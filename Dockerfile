@@ -11,7 +11,6 @@ COPY . /app
 RUN mkdir -p /tmp/chatapp_sessions /tmp/chatapp_rl \
     && chmod 777 /tmp/chatapp_sessions /tmp/chatapp_rl
 
-COPY start.sh /start.sh
-RUN chmod +x /start.sh
+EXPOSE 8080
 
-CMD ["/start.sh"]
+CMD ["php", "-S", "0.0.0.0:8080", "-t", "/app"]
