@@ -14,7 +14,7 @@ if (!$from_id) { http_response_code(400); echo json_encode(['error'=>'from_id re
 $result = supabase_request(
     'messages?user_id=eq.' . $from_id . '&receiver_id=eq.' . $user['id'] . '&status=neq.read',
     'PATCH',
-    ['status' => 'read', 'read_at' => date('c')],
+    ['status' => 'read'],
     true
 );
 

@@ -16,18 +16,47 @@ if (empty($_FILES['file'])) {
 }
 
 $file     = $_FILES['file'];
-$maxSize  = 20 * 1024 * 1024; // 20MB
-$allowed  = ['image/jpeg','image/png','image/gif','image/webp','video/mp4',
-             'application/pdf','application/zip','text/plain',
-             'application/msword','application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
+$maxSize  = 25 * 1024 * 1024; // 25MB
 
 if ($file['size'] > $maxSize) {
-    http_response_code(400); echo json_encode(['error'=>'File too large (max 20MB)']); exit;
+    http_response_code(400); echo json_encode(['error'=>'File too large (max 25MB)']); exit;
 }
 
-$mime = mime_content_type($file['tmp_name']);
+// Detect MIME — prefer finfo, fall back to mime_content_type, then extension map
+$mime = false;
+if (function_exists('finfo_open')) {
+    $finfo = finfo_open(FILEINFO_MIME_TYPE);
+    $mime  = finfo_file($finfo, $file['tmp_name']);
+    finfo_close($finfo);
+}
+if (!$mime || $mime === 'application/octet-stream') {
+    $mime = mime_content_type($file['tmp_name']);
+}
+// Extension-based override for types that are poorly detected
+$ext     = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+$extMap  = [
+    'webm' => 'audio/webm', 'ogg' => 'audio/ogg', 'mp3' => 'audio/mpeg',
+    'wav'  => 'audio/wav',  'm4a' => 'audio/mp4',
+    'mp4'  => 'video/mp4',  'mov' => 'video/quicktime', 'webp' => 'image/webp',
+    'jpg'  => 'image/jpeg', 'jpeg'=> 'image/jpeg', 'png'  => 'image/png',
+    'gif'  => 'image/gif',  'pdf' => 'application/pdf',
+    'zip'  => 'application/zip', 'txt' => 'text/plain',
+    'doc'  => 'application/msword',
+    'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+];
+if (isset($extMap[$ext])) $mime = $extMap[$ext];
+
+$allowed = [
+    'image/jpeg','image/png','image/gif','image/webp',
+    'video/mp4','video/quicktime','video/webm',
+    'audio/webm','audio/ogg','audio/mpeg','audio/wav','audio/mp4',
+    'application/pdf','application/zip','text/plain',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+];
+
 if (!in_array($mime, $allowed)) {
-    http_response_code(400); echo json_encode(['error'=>'File type not allowed']); exit;
+    http_response_code(400); echo json_encode(['error'=>'File type not allowed: ' . $mime]); exit;
 }
 
 $ext      = pathinfo($file['name'], PATHINFO_EXTENSION);

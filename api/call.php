@@ -47,7 +47,7 @@ if ($method === 'POST') {
         // Store ICE candidate (append to offer field as JSON array)
         $callId    = $input['call_id'];
         $candidate = $input['candidate'];
-        $call      = supabase_request('calls?id=eq.' . $callId . '&select=offer,answer', 'GET', [], true);
+        $call      = supabase_request('calls?id=eq.' . $callId . '&select=caller_id,offer,answer', 'GET', [], true);
         if (!empty($call['data'][0])) {
             $field   = ($call['data'][0]['caller_id'] ?? '') === $user['id'] ? 'offer' : 'answer';
             $current = json_decode($call['data'][0][$field] ?? '{}', true);
@@ -58,10 +58,24 @@ if ($method === 'POST') {
     }
 
 } elseif ($method === 'GET') {
-    // Poll for active call directed to me
-    $result = supabase_request(
-        'calls?receiver_id=eq.' . $user['id'] . '&status=eq.ringing&order=created_at.desc&limit=1',
-        'GET', [], true
-    );
-    echo json_encode(['success' => true, 'data' => $result['data'] ?? []]);
+    $action = $_GET['action'] ?? '';
+
+    if ($action === 'get_ice') {
+        // Return ICE candidates stored by the OTHER party
+        $callId = (int)($_GET['call_id'] ?? 0);
+        $call   = supabase_request('calls?id=eq.' . $callId . '&select=caller_id,offer,answer', 'GET', [], true);
+        if (empty($call['data'][0])) { echo json_encode(['success'=>false]); exit; }
+        $row   = $call['data'][0];
+        // Caller fetches answer-ICE; receiver fetches offer-ICE
+        $field = ($row['caller_id'] === $user['id']) ? 'answer' : 'offer';
+        $data  = json_decode($row[$field] ?? '{}', true);
+        echo json_encode(['success' => true, 'data' => $data['ice'] ?? []]);
+    } else {
+        // Poll for active call directed to me
+        $result = supabase_request(
+            'calls?receiver_id=eq.' . $user['id'] . '&status=eq.ringing&order=created_at.desc&limit=1',
+            'GET', [], true
+        );
+        echo json_encode(['success' => true, 'data' => $result['data'] ?? []]);
+    }
 }

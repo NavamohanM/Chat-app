@@ -32,6 +32,8 @@ let selectedFile  = null;
 let isOnline      = navigator.onLine;
 let offlineQueue  = [];   // localStorage-backed offline queue
 let broadcastChannel = null;
+let totalUnread   = 0;    // for browser tab badge
+let newMsgDividerAdded = false; // "New Messages" divider
 
 // ── DOM ───────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -64,6 +66,23 @@ function setupJumpBtn() {
     });
 }
 
+// ── Browser notifications ─────────────────────────────────────
+function requestNotificationPermission() {
+    if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission();
+    }
+}
+function showBrowserNotification(title, body, icon) {
+    if (!('Notification' in window)) return;
+    if (Notification.permission !== 'granted') return;
+    if (document.visibilityState === 'visible') return; // tab is focused — skip
+    try {
+        const n = new Notification(title, { body, icon: icon || '/favicon.ico', tag: 'chat-msg', renotify: true });
+        n.onclick = () => { window.focus(); n.close(); };
+        setTimeout(() => n.close(), 5000);
+    } catch(e) {}
+}
+
 // ── Init ──────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
     loadOfflineQueue();
@@ -72,11 +91,30 @@ document.addEventListener('DOMContentLoaded', () => {
     loadUsers();
     subscribeRealtime();
     subscribeBroadcast();
+    startPolling();           // always-on fallback — ensures messages never get stuck
+    requestNotificationPermission();
     setInterval(updateLastSeen, 30000);
     document.addEventListener('click', e => {
         if (!ctxMenu.contains(e.target)) ctxMenu.style.display = 'none';
         if (!$('emoji-bar').contains(e.target) && !e.target.closest('.btn-emoji')) closeEmoji();
+        // Close reaction picker on outside click
+        document.querySelectorAll('.reaction-picker').forEach(p => p.remove());
     });
+
+    // Paste image from clipboard
+    document.addEventListener('paste', handlePaste);
+
+    // Drag and drop files onto chat
+    const chatView = $('chat-view');
+    if (chatView) {
+        chatView.addEventListener('dragover', e => { e.preventDefault(); chatView.classList.add('drag-over'); });
+        chatView.addEventListener('dragleave', e => { if (!chatView.contains(e.relatedTarget)) chatView.classList.remove('drag-over'); });
+        chatView.addEventListener('drop', e => {
+            e.preventDefault(); chatView.classList.remove('drag-over');
+            const file = e.dataTransfer.files[0];
+            if (file && activePeer) { selectedFile = file; showFilePreview(file); }
+        });
+    }
 
     // Online / offline detection
     window.addEventListener('online',  handleOnline);
@@ -111,6 +149,116 @@ function showOfflineBanner() {
 function hideOfflineBanner() {
     const b = $('offline-banner');
     if (b) b.classList.remove('show');
+}
+
+// ── Paste image from clipboard ────────────────────────────────
+function handlePaste(e) {
+    if (!activePeer) return;
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+        if (item.type.startsWith('image/')) {
+            e.preventDefault();
+            const file = item.getAsFile();
+            if (file) { selectedFile = file; showFilePreview(file); }
+            break;
+        }
+    }
+}
+
+// ── Show file preview (shared by drag-drop & paste) ──────────
+function showFilePreview(file) {
+    const modal   = $('file-preview-modal');
+    const content = $('file-preview-content');
+    if (file.type.startsWith('image/')) {
+        const reader = new FileReader();
+        reader.onload = e => { content.innerHTML = `<img src="${e.target.result}" alt="preview">`; };
+        reader.readAsDataURL(file);
+    } else {
+        content.innerHTML = `<div class="file-preview-icon"><i class="fa-solid fa-file"></i><span>${escHtml(file.name)}</span><small>${formatSize(file.size)}</small></div>`;
+    }
+    modal.style.display = 'flex';
+}
+
+// ── Forward message modal ─────────────────────────────────────
+let _forwardMsg = null;
+
+function showForwardModal(msg) {
+    _forwardMsg = msg;
+    let modal = $('forward-modal');
+    if (modal) modal.remove();
+    modal = document.createElement('div');
+    modal.id = 'forward-modal';
+    modal.className = 'forward-modal-overlay';
+    const peers = allUsers.filter(u => u.id !== CURRENT_USER.id);
+    modal.innerHTML = `
+        <div class="forward-modal">
+            <div class="forward-header">
+                <span>Forward to...</span>
+                <button onclick="document.getElementById('forward-modal').remove()"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="forward-list">
+                ${peers.map(u => `
+                <div class="forward-item" data-uid="${escAttr(u.id)}" data-uname="${escAttr(u.username)}" data-ucolor="${escAttr(u.avatar_color)}">
+                    <div class="user-av" style="background:${u.avatar_color};width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;color:#fff;flex-shrink:0">${u.username[0].toUpperCase()}</div>
+                    <span>${escHtml(u.username)}</span>
+                </div>`).join('')}
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+    modal.querySelectorAll('.forward-item').forEach(item => {
+        item.addEventListener('click', () => {
+            doForward(item.dataset.uid, item.dataset.uname, item.dataset.ucolor, _forwardMsg);
+        });
+    });
+    modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+}
+
+async function doForward(uid, username, color, msg) {
+    document.getElementById('forward-modal')?.remove();
+    const body = { receiver_id: uid };
+    if (msg.message) body.message = msg.message;
+    if (msg.file_url) { body.file_url = msg.file_url; body.file_name = msg.file_name; body.file_type = msg.file_type; }
+    try {
+        const res  = await fetch('api/send_message.php', {
+            method: 'POST', headers: {'Content-Type':'application/json','X-CSRF-Token':CSRF_TOKEN}, body: JSON.stringify(body)
+        });
+        const json = await res.json();
+        if (json.success) {
+            showToast(`Forwarded to ${username}`, '');
+            broadcastToUser(uid, 'new_message', { msg: json.data });
+            if (activePeer && uid === activePeer.id && json.data) { appendMessage(json.data, true); scrollToBottom(true); }
+        }
+    } catch(e) { showToast('Forward failed', ''); }
+}
+
+// ── User profile modal ────────────────────────────────────────
+function showProfileModal(user) {
+    let modal = $('profile-modal');
+    if (modal) modal.remove();
+    modal = document.createElement('div');
+    modal.id = 'profile-modal';
+    modal.className = 'profile-modal-overlay';
+    modal.innerHTML = `
+        <div class="profile-modal">
+            <button class="profile-close" onclick="document.getElementById('profile-modal').remove()"><i class="fa-solid fa-xmark"></i></button>
+            <div class="profile-avatar" style="background:${user.avatar_color}">${user.username[0].toUpperCase()}</div>
+            <div class="profile-name">${escHtml(user.username)}</div>
+            <div class="profile-status" id="pm-status">Checking status...</div>
+            <div class="profile-actions">
+                <button onclick="document.getElementById('profile-modal').remove();openChat('${user.id}','${escAttr(user.username)}','${user.avatar_color}')">
+                    <i class="fa-solid fa-message"></i> Message
+                </button>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+    modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+    // Populate status
+    const u = allUsers.find(u2 => u2.id === user.id);
+    if (u && u.last_seen) {
+        const diff = (Date.now() - new Date(u.last_seen)) / 1000;
+        $('pm-status').textContent = diff < 35 ? '🟢 Online' : 'Last seen ' + formatLastSeen(new Date(u.last_seen));
+    }
 }
 
 // ── Offline queue (localStorage) ──────────────────────────────
@@ -249,6 +397,7 @@ async function openChat(id, username, color) {
     peerNameEl.textContent      = username;
     peerAvatarEl.textContent    = username[0].toUpperCase();
     peerAvatarEl.style.background = color;
+    peerAvatarEl.onclick        = () => showProfileModal(activePeer);
     peerSubEl.textContent       = 'Online';
     peerSubEl.className         = 'chat-header-sub live';
 
@@ -256,7 +405,7 @@ async function openChat(id, username, color) {
     chatView.style.display      = 'flex';
 
     messages  = []; lastDate = null; lastGroup = null; lastMsgTs = null;
-    oldestMsgTs = null; hasMoreMsgs = true;
+    oldestMsgTs = null; hasMoreMsgs = true; newMsgDividerAdded = false;
     msgsEl.innerHTML = '<div class="msgs-loading"><i class="fa-solid fa-spinner fa-spin"></i></div>';
     cancelReply();
     clearUnread(id);
@@ -287,6 +436,11 @@ async function loadMessages() {
         lastMsgTs   = json.data[json.data.length - 1].created_at;
         oldestMsgTs = json.data[0].created_at;
         scrollToBottom(false);
+        // Load reactions for visible messages
+        const msgIds = json.data.map(m => m.id).filter(id => !String(id).startsWith('temp_'));
+        if (msgIds.length) loadReactions(msgIds);
+        // Notify sender their messages are delivered (so they see double grey tick)
+        broadcastToUser(activePeer.id, 'delivered', { from: CURRENT_USER.id });
         // Set up infinite scroll
         setupInfiniteScroll();
     } catch(e) {
@@ -398,27 +552,44 @@ function jumpToMessage(id) {
 // ── Mark messages as read ─────────────────────────────────────
 async function markRead(fromId) {
     try {
-        await fetch('api/mark_read.php', {
+        const res  = await fetch('api/mark_read.php', {
             method: 'POST', headers: {'Content-Type':'application/json','X-CSRF-Token':CSRF_TOKEN},
             body: JSON.stringify({ from_id: fromId })
         });
-        // Update status icons for messages we sent (now marked read on their side)
-        // The realtime UPDATE event will handle the other user's UI
+        const json = await res.json();
+        // Notify the sender that their messages are now read
+        if (json.success) {
+            broadcastToUser(fromId, 'read_receipt', { from: CURRENT_USER.id, to: fromId });
+        }
     } catch(e) {}
 }
 
 // ── Broadcast to another user's channel ──────────────────────
+// Pre-subscribed persistent channels — wait for SUBSCRIBED before sending
+const _sendChannels = {};
+const _sendQueues   = {};
 function broadcastToUser(userId, event, payload) {
-    // Each user listens on 'broadcast-{their_id}'
-    // We send to that channel so they receive it instantly
-    const ch = supabaseClient.channel('broadcast-' + userId);
-    ch.subscribe(status => {
-        if (status === 'SUBSCRIBED') {
-            ch.send({ type: 'broadcast', event, payload });
-            // Clean up after sending
-            setTimeout(() => supabaseClient.removeChannel(ch), 1000);
-        }
-    });
+    if (!_sendChannels[userId]) {
+        const ch = supabaseClient.channel('send-to-' + userId, { config: { broadcast: { self: true } } });
+        _sendQueues[userId] = [];
+        _sendChannels[userId] = ch;
+        ch.subscribe(status => {
+            if (status === 'SUBSCRIBED') {
+                // Flush any queued messages
+                (_sendQueues[userId] || []).forEach(q => ch.send(q));
+                _sendQueues[userId] = [];
+            }
+        });
+    }
+    const msg = { type: 'broadcast', event, payload };
+    const ch  = _sendChannels[userId];
+    // If not yet subscribed, queue it
+    if (ch.state !== 'joined') {
+        _sendQueues[userId] = _sendQueues[userId] || [];
+        _sendQueues[userId].push(msg);
+    } else {
+        ch.send(msg);
+    }
 }
 
 // ── Realtime subscription ─────────────────────────────────────
@@ -427,17 +598,45 @@ function subscribeRealtime() {
 
     channel = supabaseClient
         .channel('chat-' + CURRENT_USER.id)
-        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, onNewMessage)
+        // Filter to only messages sent TO me — ensures full payload is delivered
+        .on('postgres_changes', {
+            event: 'INSERT', schema: 'public', table: 'messages',
+            filter: `receiver_id=eq.${CURRENT_USER.id}`,
+        }, onNewMessage)
+        // Also listen for messages I sent (for multi-tab / multi-device sync)
+        .on('postgres_changes', {
+            event: 'INSERT', schema: 'public', table: 'messages',
+            filter: `user_id=eq.${CURRENT_USER.id}`,
+        }, onOwnMessageInsert)
         .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages' }, onUpdateMessage)
         .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'users' },    onUserUpdate)
         .subscribe(status => {
-            console.log('Realtime:', status);
-            if (status === 'SUBSCRIBED') { setConnected(true); stopPolling(); flushOfflineQueue(); }
-            else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-                setConnected(false); startPolling();
+            if (status === 'SUBSCRIBED') {
+                setConnected(true);
+                flushOfflineQueue();
+                // Always keep polling as a safety net — real-time can miss messages
+                startPolling();
+            } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+                setConnected(false);
+                startPolling();
                 setTimeout(subscribeRealtime, 5000);
             }
         });
+}
+
+// Own message confirmed by DB (multi-tab sync / confirm temp bubble)
+function onOwnMessageInsert(payload) {
+    const msg = payload.new;
+    if (!msg || !activePeer) return;
+    if (msg.receiver_id !== activePeer.id) return;
+    // Replace temp bubble if it exists
+    const ti = messages.findIndex(m => String(m.id).startsWith('temp_') && m.user_id === CURRENT_USER.id);
+    if (ti !== -1) {
+        const old = messages[ti].id;
+        messages[ti] = msg;
+        const el = document.querySelector(`[data-id="${old}"]`);
+        if (el) { el.setAttribute('data-id', msg.id); el.classList.remove('pending'); updateStatusTick(el, msg.status || 'sent'); }
+    }
 }
 
 // ── Broadcast channel (typing + instant message delivery) ─────
@@ -452,10 +651,36 @@ function subscribeBroadcast() {
                 else hideTyping();
             }
         })
+        .on('broadcast', { event: 'delivered' }, ({ payload }) => {
+            // Peer has loaded/received our messages — update single tick → double grey tick
+            if (!activePeer || payload.from !== activePeer.id) return;
+            document.querySelectorAll('.msg-bubble[data-own="1"] .msg-status').forEach(tick => {
+                // Only upgrade from single tick — don't downgrade blue ticks
+                if (tick.querySelector('.read')) return;
+                tick.innerHTML = '<i class="fa-solid fa-check-double"></i>';
+            });
+            messages.forEach(m => { if (m.user_id === CURRENT_USER.id && m.status === 'sent') m.status = 'delivered'; });
+        })
+        .on('broadcast', { event: 'read_receipt' }, ({ payload }) => {
+            // Peer has read our messages — update all our sent message ticks to blue
+            if (!activePeer || payload.from !== activePeer.id) return;
+            document.querySelectorAll('.msg-bubble[data-own="1"] .msg-status').forEach(tick => {
+                tick.innerHTML = '<i class="fa-solid fa-check-double read"></i>';
+            });
+            messages.forEach(m => { if (m.user_id === CURRENT_USER.id) m.status = 'read'; });
+        })
+        .on('broadcast', { event: 'reaction' }, ({ payload }) => {
+            // Peer added/removed a reaction — just render locally (already persisted by them)
+            if (activePeer && payload.from === activePeer.id) {
+                renderReaction(payload.msgId, payload.emoji, activePeer.username, payload.removed || false);
+            }
+        })
         .on('broadcast', { event: 'new_message' }, ({ payload }) => {
             // Instant message delivery — sent by the other user directly
             const msg = payload.msg;
             if (!msg) return;
+            // Drop messages from blocked users
+            if (blockedUsers.has(msg.user_id)) return;
             const forMe      = msg.receiver_id === CURRENT_USER.id;
             const fromActive = activePeer && msg.user_id === activePeer.id;
             if (forMe && fromActive) {
@@ -472,6 +697,7 @@ function subscribeBroadcast() {
                 setPreview(msg.user_id, msg.message || '📎 File');
                 updateUserTime(msg.user_id);
                 playSound('receive');
+                showBrowserNotification(msg.username, msg.message || '📎 Sent a file');
             }
         })
         .subscribe();
@@ -481,16 +707,9 @@ function subscribeBroadcast() {
 function onNewMessage(payload) {
     const msg = payload.new;
 
-    // ── CASE 1: receiver_id missing from payload ──────────────
-    // This happens when REPLICA IDENTITY FULL is not set.
-    // We get the insert but don't know who it's for.
-    // Strategy: always fetchLatest for active chat, and poll
-    // unread counts for all users.
-    if (!msg.receiver_id) {
-        if (activePeer) fetchLatest();
-        fetchUnreadPreviews();
-        return;
-    }
+    // receiver_id missing = replica identity not set (old Supabase projects)
+    // fetchLatest() polling already handles this as a safety net — just return
+    if (!msg.receiver_id) return;
 
     // ── CASE 2: Full payload available ───────────────────────
     const isMine     = msg.user_id     === CURRENT_USER.id;
@@ -527,6 +746,7 @@ function onNewMessage(payload) {
         setPreview(msg.user_id, msg.message || '📎 File');
         updateUserTime(msg.user_id);
         playSound('receive');
+        showBrowserNotification(msg.username, msg.message || '📎 Sent a file');
 
     // Message is from me to someone else (sent from another tab/device)
     } else if (isMine && !toActive) {
@@ -611,21 +831,25 @@ function updateStatusTick(el, status) {
 async function fetchLatest() {
     if (!activePeer) return;
     try {
-        const after = lastMsgTs ? `&after=${encodeURIComponent(lastMsgTs)}` : '';
-        const res   = await fetch(`api/fetch_messages.php?with=${activePeer.id}&limit=10${after}`);
-        const json  = await res.json();
+        const res  = await fetch(`api/fetch_messages.php?with=${activePeer.id}&limit=20`);
+        const json = await res.json();
         if (!json.success || !json.data.length) return;
         let added = false;
         json.data.forEach(m => {
-            if (messages.find(x => x.id === m.id)) return;
+            // Skip if already present (by real ID — ignore temp IDs)
+            if (messages.find(x => x.id === m.id && !String(x.id).startsWith('temp_'))) return;
+            // Replace matching temp message from same sender
             const ti = messages.findIndex(x => String(x.id).startsWith('temp_') && x.user_id === m.user_id);
             if (ti !== -1) {
                 const old = messages[ti].id;
                 messages[ti] = m;
                 const el = document.querySelector(`[data-id="${old}"]`);
-                if (el) { el.setAttribute('data-id', m.id); el.classList.remove('pending'); updateStatusTick(el, m.status); }
-            } else { appendMessage(m, true); added = true; }
-            lastMsgTs = m.created_at;
+                if (el) { el.setAttribute('data-id', m.id); el.classList.remove('pending'); updateStatusTick(el, m.status || 'sent'); }
+            } else {
+                appendMessage(m, true);
+                added = true;
+            }
+            if (!lastMsgTs || m.created_at > lastMsgTs) lastMsgTs = m.created_at;
         });
         if (added) scrollToBottom(true);
     } catch(e) {}
@@ -696,17 +920,7 @@ function handleFileSelect(input) {
     const file = input.files[0];
     if (!file) return;
     selectedFile = file;
-    const modal   = $('file-preview-modal');
-    const content = $('file-preview-content');
-
-    if (file.type.startsWith('image/')) {
-        const reader = new FileReader();
-        reader.onload = e => { content.innerHTML = `<img src="${e.target.result}" alt="preview">`; };
-        reader.readAsDataURL(file);
-    } else {
-        content.innerHTML = `<div class="file-preview-icon"><i class="fa-solid fa-file"></i><span>${escHtml(file.name)}</span><small>${formatSize(file.size)}</small></div>`;
-    }
-    modal.style.display = 'flex';
+    showFilePreview(file);
     input.value = '';
 }
 
@@ -719,18 +933,19 @@ function cancelFileUpload() {
 async function sendFile() {
     if (!selectedFile || !activePeer) return;
     if (!isOnline) { showToast('No connection — file upload requires internet', ''); return; }
-    const caption = $('file-caption').value.trim();
+    const caption  = $('file-caption').value.trim();
+    const fileToSend = selectedFile; // capture before cancelFileUpload clears it
     cancelFileUpload();
 
     const formData = new FormData();
-    formData.append('file', selectedFile);
+    formData.append('file', fileToSend);
 
     const tempId  = 'temp_' + Date.now();
     const tempMsg = {
         id: tempId, user_id: CURRENT_USER.id, receiver_id: activePeer.id,
-        username: CURRENT_USER.username, message: caption || selectedFile.name,
+        username: CURRENT_USER.username, message: caption || fileToSend.name,
         created_at: new Date().toISOString(), _pending: true, _uploading: true,
-        file_name: selectedFile.name, file_type: selectedFile.type, status: 'sent',
+        file_name: fileToSend.name, file_type: fileToSend.type, status: 'sent',
     };
     removeEmptyState();
     appendMessage(tempMsg, true);
@@ -791,6 +1006,8 @@ function uploadWithProgress(formData, tempId) {
 
 // ── Render message ────────────────────────────────────────────
 function appendMessage(msg, animate) {
+    // Don't show messages from blocked users (incoming only)
+    if (msg.user_id !== CURRENT_USER.id && blockedUsers.has(msg.user_id)) return;
     messages.push(msg);
     const isOwn   = msg.user_id === CURRENT_USER.id;
     const dir     = isOwn ? 'outgoing' : 'incoming';
@@ -803,6 +1020,15 @@ function appendMessage(msg, animate) {
         div.className = 'date-divider';
         div.innerHTML = `<span>${dateStr}</span>`;
         msgsEl.appendChild(div);
+    }
+
+    // "New Messages" divider — shown once when first new incoming message arrives
+    if (animate && !isOwn && !newMsgDividerAdded && messages.length > 1) {
+        newMsgDividerAdded = true;
+        const nd = document.createElement('div');
+        nd.className = 'new-msg-divider';
+        nd.innerHTML = '<span>New Messages</span>';
+        msgsEl.appendChild(nd);
     }
 
     const prev     = messages[messages.length - 2];
@@ -836,6 +1062,11 @@ function makeBubble(msg, isOwn) {
         + (msg.deleted_at ? ' deleted'   : '');
     b.setAttribute('data-id',  msg.id);
     b.setAttribute('data-own', isOwn ? '1' : '0');
+    // Hover timestamp tooltip
+    if (msg.created_at) {
+        const full = new Date(msg.created_at).toLocaleString(undefined, {weekday:'short',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+        b.setAttribute('title', full);
+    }
 
     if (msg.deleted_at) {
         b.innerHTML = '<i class="fa-solid fa-ban"></i> This message was deleted';
@@ -872,7 +1103,9 @@ function makeBubble(msg, isOwn) {
         }
     }
 
-    if (msg.message) html += `<span class="msg-text">${escHtml(msg.message)}</span>${msg.edited_at ? '<span class="edited-mark">edited</span>' : ''}`;
+    if (msg.message) {
+        html += `<span class="msg-text">${linkify(escHtml(msg.message))}</span>${msg.edited_at ? '<span class="edited-mark">edited</span>' : ''}`;
+    }
     if (msg._uploading) html += '<span class="upload-progress"><i class="fa-solid fa-spinner fa-spin"></i> Uploading...</span>';
 
     // Status tick for own messages
@@ -892,15 +1125,71 @@ function makeBubble(msg, isOwn) {
     b.addEventListener('touchstart', e => { pressTimer = setTimeout(() => { e.preventDefault(); showCtxMenu(e.touches[0], msg.id, isOwn); }, 500); });
     b.addEventListener('touchend',   () => clearTimeout(pressTimer));
 
+    // Link preview (lazy, after bubble is in DOM)
+    if (msg.message && !msg.file_url) {
+        const urls = extractUrls(msg.message);
+        if (urls.length) {
+            setTimeout(() => fetchLinkPreview(urls[0], b), 50);
+        }
+    }
+
     return b;
+}
+
+// ── Link detection & preview ──────────────────────────────────
+const URL_REGEX = /https?:\/\/[^\s<>"']+/g;
+
+function extractUrls(text) {
+    return [...(text.match(URL_REGEX) || [])];
+}
+
+function linkify(html) {
+    // html is already escaped — find escaped URLs and wrap them
+    return html.replace(/https?:\/\/[^\s&<>"]+/g, url => {
+        const display = url.length > 50 ? url.slice(0, 47) + '…' : url;
+        return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="msg-link">${display}</a>`;
+    });
+}
+
+const _previewCache = {};
+async function fetchLinkPreview(url, bubbleEl) {
+    if (_previewCache[url] === null) return; // known failure
+    try {
+        let data = _previewCache[url];
+        if (!data) {
+            const res = await fetch('api/link_preview.php?url=' + encodeURIComponent(url));
+            data = await res.json();
+            _previewCache[url] = data.success ? data : null;
+        }
+        if (!data || !data.success || !data.title) return;
+        if (!bubbleEl.isConnected) return; // bubble was removed
+        const card = document.createElement('a');
+        card.className = 'link-preview-card';
+        card.href = data.url || url;
+        card.target = '_blank';
+        card.rel = 'noopener noreferrer';
+        card.innerHTML = (data.image ? `<img src="${escAttr(data.image)}" alt="" onerror="this.remove()">` : '')
+            + `<div class="lp-text">
+                <div class="lp-site">${escHtml(data.site_name || '')}</div>
+                <div class="lp-title">${escHtml(data.title)}</div>
+                ${data.description ? `<div class="lp-desc">${escHtml(data.description)}</div>` : ''}
+               </div>`;
+        bubbleEl.appendChild(card);
+    } catch(e) { _previewCache[url] = null; }
 }
 
 async function fetchReplyData(replyId, bubbleEl) {
     try {
-        const res  = await fetch(`api/fetch_messages.php?reply_id=${replyId}`);
-        // fallback: try direct lookup
-        // Actually use a dedicated approach via users API – simpler: store _replyData in msg
-        // For now skip if data not available
+        const res  = await fetch(`api/reply_data.php?id=${encodeURIComponent(replyId)}`);
+        const json = await res.json();
+        if (!json.success || !json.data) return;
+        const rd = json.data;
+        const quoteEl = bubbleEl.querySelector('.reply-quote');
+        if (quoteEl) {
+            const rtext = rd.message || (rd.file_type ? '📎 File' : '—');
+            quoteEl.className = 'reply-quote';
+            quoteEl.innerHTML = `<span>${escHtml(rd.username)}</span><p>${escHtml(rtext)}</p>`;
+        }
     } catch(e) {}
 }
 
@@ -918,10 +1207,16 @@ function showCtxMenu(e, msgId, isOwn) {
     const x = e.clientX ?? e.pageX ?? 0;
     const y = e.clientY ?? e.pageY ?? 0;
     ctxMenu.style.left = Math.min(x, window.innerWidth  - 170) + 'px';
-    ctxMenu.style.top  = Math.min(y, window.innerHeight - 130) + 'px';
+    ctxMenu.style.top  = Math.min(y, window.innerHeight - 150) + 'px';
     // Show/hide options based on ownership
     ctxMenu.querySelector('.danger').style.display    = isOwn ? 'flex' : 'none';
     ctxMenu.querySelector('.edit-only').style.display = isOwn ? 'flex' : 'none';
+    // Show copy only for text messages
+    const copyItem = ctxMenu.querySelector('.copy-only');
+    if (copyItem) {
+        const msg = messages.find(m => m.id === ctxMsgId);
+        copyItem.style.display = msg?.message ? 'flex' : 'none';
+    }
     // Block label
     const blockLabel = $('ctx-block-label');
     if (blockLabel && activePeer) {
@@ -938,6 +1233,27 @@ function ctxReply() {
     replyBar.style.display = 'flex';
     inputEl.focus();
     ctxMenu.style.display = 'none';
+}
+
+function ctxCopy() {
+    const msg = messages.find(m => m.id === ctxMsgId);
+    if (!msg || !msg.message) return;
+    ctxMenu.style.display = 'none';
+    navigator.clipboard.writeText(msg.message).then(() => showToast('Copied', '')).catch(() => {
+        // Fallback for older browsers
+        const ta = document.createElement('textarea');
+        ta.value = msg.message; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        document.execCommand('copy'); document.body.removeChild(ta);
+        showToast('Copied', '');
+    });
+}
+
+function ctxForward() {
+    const msg = messages.find(m => m.id === ctxMsgId);
+    if (!msg) return;
+    ctxMenu.style.display = 'none';
+    showForwardModal(msg);
 }
 
 function cancelReply() { replyTo = null; replyBar.style.display = 'none'; }
@@ -1013,15 +1329,22 @@ async function ctxDelete() {
 // ── Clear all chat ────────────────────────────────────────────
 async function clearChat() {
     if (!activePeer) return;
-    if (!confirm(`Clear all messages with ${activePeer.username}?`)) return;
-    const mine = messages.filter(m => m.user_id === CURRENT_USER.id);
-    await Promise.all(mine.map(m =>
-        fetch('api/delete_message.php', {
+    if (!confirm(`Clear all messages with ${activePeer.username}? This clears the chat for both of you.`)) return;
+    try {
+        const res  = await fetch('api/clear_chat.php', {
             method: 'POST', headers: {'Content-Type':'application/json','X-CSRF-Token':CSRF_TOKEN},
-            body: JSON.stringify({ message_id: m.id })
-        })
-    ));
-    await loadMessages();
+            body: JSON.stringify({ peer_id: activePeer.id })
+        });
+        const json = await res.json();
+        if (json.success) {
+            messages = [];
+            msgsEl.innerHTML = `<div class="empty-state"><i class="fa-regular fa-comment-dots"></i><p>Chat cleared.</p></div>`;
+            setPreview(activePeer.id, 'Chat cleared');
+            showToast('Chat cleared', '');
+        } else {
+            showToast(json.error || 'Failed to clear chat', '');
+        }
+    } catch(e) { showToast('Failed to clear chat', ''); }
 }
 
 // ── Voice message recording ───────────────────────────────────
@@ -1121,7 +1444,7 @@ function updateLastSeen() {
     refreshOnlineStatus();
 }
 
-// ── Unread ────────────────────────────────────────────────────
+// ── Unread + tab badge ────────────────────────────────────────
 function addUnread(uid) {
     unreadCounts[uid] = (unreadCounts[uid] || 0) + 1;
     saveUnreadCounts();
@@ -1130,6 +1453,9 @@ function addUnread(uid) {
     // Bump user to top
     const item = $('ui-' + uid);
     if (item) usersList.prepend(item);
+    // Update tab title
+    totalUnread = Object.values(unreadCounts).reduce((s, v) => s + v, 0);
+    updateTabTitle();
 }
 
 function clearUnread(uid) {
@@ -1137,6 +1463,13 @@ function clearUnread(uid) {
     saveUnreadCounts();
     const b = $('badge-' + uid);
     if (b) b.style.display = 'none';
+    totalUnread = Object.values(unreadCounts).reduce((s, v) => s + v, 0);
+    updateTabTitle();
+}
+
+function updateTabTitle() {
+    const base = document.title.replace(/^\(\d+\) /, '');
+    document.title = totalUnread > 0 ? `(${totalUnread}) ${base}` : base;
 }
 
 function setPreview(uid, text) {
@@ -1149,12 +1482,12 @@ function updateUserTime(uid) {
     if (el) el.textContent = formatTime(new Date().toISOString());
 }
 
-// ── Polling fallback ──────────────────────────────────────────
+// ── Polling (always-on safety net — catches missed realtime events) ───
 function startPolling() {
     if (pollTimer) return;
     pollTimer = setInterval(() => { if (activePeer) fetchLatest(); }, 2500);
 }
-function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+function stopPolling() { /* keep polling always running — do not stop */ }
 
 // ── Connection ────────────────────────────────────────────────
 function setConnected(ok) {
@@ -1170,9 +1503,34 @@ function showToast(msg, type) {
     toastT = setTimeout(() => { t.className=''; }, 2500);
 }
 
-// ── Sounds ────────────────────────────────────────────────────
+// ── Sounds (Web Audio API — no files needed) ──────────────────
+let _audioCtx = null;
+function getAudioCtx() {
+    if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    return _audioCtx;
+}
+function playTone(freq, duration, type = 'sine', gain = 0.15) {
+    try {
+        const ctx = getAudioCtx();
+        const osc = ctx.createOscillator();
+        const g   = ctx.createGain();
+        osc.connect(g); g.connect(ctx.destination);
+        osc.type = type; osc.frequency.value = freq;
+        g.gain.setValueAtTime(gain, ctx.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + duration);
+    } catch(e) {}
+}
 function playSound(name) {
-    try { const a = $(name==='send'?'snd-send':'snd-receive'); if(a){a.currentTime=0;a.play().catch(()=>{});} } catch(e){}
+    if (localStorage.getItem('chat_sound') === '0') return;
+    if (name === 'send') {
+        playTone(880, 0.08, 'sine', 0.12);
+    } else {
+        // Two-tone receive beep
+        playTone(660, 0.1, 'sine', 0.15);
+        setTimeout(() => playTone(880, 0.1, 'sine', 0.15), 120);
+    }
 }
 
 // ── Lightbox ──────────────────────────────────────────────────
@@ -1215,9 +1573,175 @@ function insertEmoji(e) {
 }
 
 // ── Input ─────────────────────────────────────────────────────
-function handleKey(e) { if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage();} }
+function handleKey(e) {
+    const enterSends = localStorage.getItem('chat_enter_send') !== '0';
+    if (e.key === 'Enter' && !e.shiftKey && enterSends) { e.preventDefault(); sendMessage(); }
+}
 function autoResize(el) { el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,120)+'px'; }
+
+// ── Emoji reactions ───────────────────────────────────────────
+const REACTIONS = ['👍','❤️','😂','😮','😢','🙏'];
+
+function ctxReact() {
+    ctxMenu.style.display = 'none';
+    const bubble = document.querySelector(`[data-id="${ctxMsgId}"]`);
+    if (!bubble) return;
+    document.querySelectorAll('.reaction-picker').forEach(p => p.remove());
+    const picker = document.createElement('div');
+    picker.className = 'reaction-picker';
+    REACTIONS.forEach(emoji => {
+        const btn = document.createElement('button');
+        btn.textContent = emoji;
+        btn.onclick = () => { addReaction(ctxMsgId, emoji); picker.remove(); };
+        picker.appendChild(btn);
+    });
+    // Position near the bubble
+    const rect = bubble.getBoundingClientRect();
+    picker.style.cssText = `position:fixed;top:${rect.top - 50}px;left:${Math.max(8, rect.left)}px`;
+    document.body.appendChild(picker);
+    setTimeout(() => document.addEventListener('click', () => picker.remove(), { once: true }), 50);
+}
+
+async function addReaction(msgId, emoji) {
+    // Persist to DB (toggle)
+    try {
+        const res  = await fetch('api/reactions.php', {
+            method: 'POST', headers: {'Content-Type':'application/json','X-CSRF-Token':CSRF_TOKEN},
+            body: JSON.stringify({ message_id: msgId, emoji })
+        });
+        const json = await res.json();
+        if (!json.success) return;
+        const removed = json.action === 'removed';
+        renderReaction(msgId, emoji, CURRENT_USER.username, removed);
+        // Broadcast to peer
+        if (activePeer) {
+            broadcastToUser(activePeer.id, 'reaction', { msgId, emoji, from: CURRENT_USER.id, removed });
+        }
+    } catch(e) {}
+}
+
+function renderReaction(msgId, emoji, username, removed) {
+    const bubble = document.querySelector(`[data-id="${msgId}"]`);
+    if (!bubble) return;
+    let bar = bubble.querySelector('.reaction-bar');
+    if (!bar) {
+        bar = document.createElement('div');
+        bar.className = 'reaction-bar';
+        bubble.appendChild(bar);
+    }
+    const existing = bar.querySelector(`[data-emoji="${CSS.escape(emoji)}"]`);
+    if (removed) {
+        if (existing) {
+            const cnt = parseInt(existing.dataset.count || '1') - 1;
+            if (cnt <= 0) existing.remove();
+            else { existing.dataset.count = cnt; existing.querySelector('.r-count').textContent = cnt > 1 ? cnt : ''; }
+        }
+        if (!bar.children.length) bar.remove();
+    } else {
+        if (existing) {
+            const cnt = parseInt(existing.dataset.count || '1') + 1;
+            existing.dataset.count = cnt;
+            existing.querySelector('.r-count').textContent = cnt > 1 ? cnt : '';
+            existing.title = (existing.title ? existing.title + ', ' : '') + username;
+        } else {
+            const btn = document.createElement('button');
+            btn.className = 'reaction-chip';
+            btn.dataset.emoji = emoji;
+            btn.dataset.count = '1';
+            btn.innerHTML = `${emoji}<span class="r-count"></span>`;
+            btn.title = username;
+            btn.onclick = () => addReaction(msgId, emoji);
+            bar.appendChild(btn);
+        }
+    }
+}
+
+async function loadReactions(messageIds) {
+    if (!messageIds.length) return;
+    try {
+        const res  = await fetch(`api/reactions.php?ids=${encodeURIComponent(messageIds.join(','))}`);
+        const json = await res.json();
+        if (!json.success) return;
+        // Group by message_id
+        const grouped = {};
+        (json.data || []).forEach(r => {
+            if (!grouped[r.message_id]) grouped[r.message_id] = {};
+            if (!grouped[r.message_id][r.emoji]) grouped[r.message_id][r.emoji] = { count: 0, users: [] };
+            grouped[r.message_id][r.emoji].count++;
+            grouped[r.message_id][r.emoji].users.push(r.username);
+        });
+        Object.entries(grouped).forEach(([msgId, emojis]) => {
+            Object.entries(emojis).forEach(([emoji, { count, users }]) => {
+                const bubble = document.querySelector(`[data-id="${msgId}"]`);
+                if (!bubble) return;
+                let bar = bubble.querySelector('.reaction-bar');
+                if (!bar) { bar = document.createElement('div'); bar.className = 'reaction-bar'; bubble.appendChild(bar); }
+                const btn = document.createElement('button');
+                btn.className = 'reaction-chip';
+                btn.dataset.emoji = emoji;
+                btn.dataset.count = count;
+                btn.innerHTML = `${emoji}<span class="r-count">${count > 1 ? count : ''}</span>`;
+                btn.title = users.join(', ');
+                btn.onclick = () => addReaction(msgId, emoji);
+                bar.appendChild(btn);
+            });
+        });
+    } catch(e) {}
+}
+
+// Handle incoming reactions from peer
+// (wired up in subscribeBroadcast)
 
 // ── Sidebar ───────────────────────────────────────────────────
 function toggleSidebar() { $('sidebar').classList.toggle('open'); $('sidebar-overlay').classList.toggle('show'); }
 function closeSidebar()  { $('sidebar').classList.remove('open'); $('sidebar-overlay').classList.remove('show'); }
+
+// ── Sidebar tabs (Chats / Calls) ──────────────────────────────
+function switchTab(tab) {
+    $('tab-chats').classList.toggle('active', tab === 'chats');
+    $('tab-calls').classList.toggle('active', tab === 'calls');
+    $('users-list').style.display   = tab === 'chats' ? '' : 'none';
+    $('calls-list').style.display   = tab === 'calls' ? '' : 'none';
+    $('chats-search').style.display = tab === 'chats' ? '' : 'none';
+    if (tab === 'calls') loadCallHistory();
+}
+
+async function loadCallHistory() {
+    const list = $('calls-list');
+    list.innerHTML = '<div class="sidebar-loading"><i class="fa-solid fa-spinner fa-spin"></i> Loading...</div>';
+    try {
+        const res  = await fetch('api/call_history.php?limit=30');
+        const json = await res.json();
+        if (!json.success || !json.data.length) {
+            list.innerHTML = '<div class="no-users"><i class="fa-solid fa-phone-slash"></i><p>No call history</p></div>';
+            return;
+        }
+        list.innerHTML = json.data.map(call => {
+            const isOutgoing = call.caller_id === CURRENT_USER.id;
+            const peerId     = isOutgoing ? call.receiver_id : call.caller_id;
+            const peer       = allUsers.find(u => u.id === peerId);
+            const peerName   = peer ? peer.username : 'Unknown';
+            const peerColor  = peer ? peer.avatar_color : '#6366f1';
+            const icon       = call.type === 'video' ? 'fa-video' : 'fa-phone';
+            const statusIcon = call.status === 'declined' ? 'fa-phone-slash' :
+                               call.status === 'ended'    ? (isOutgoing ? 'fa-arrow-up-right' : 'fa-arrow-down-left') :
+                               'fa-phone-missed';
+            const statusColor = call.status === 'declined' ? 'var(--red)' :
+                                call.status === 'ended'    ? 'var(--green)' : 'var(--red)';
+            const timeStr = formatDate(call.created_at) + ' ' + formatTime(call.created_at);
+            return `<div class="call-history-item" onclick="peer && openChat('${peerId}','${escAttr(peerName)}','${peerColor}')">
+                <div class="user-av" style="background:${peerColor};width:46px;height:46px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:#fff;flex-shrink:0">${peerName[0].toUpperCase()}</div>
+                <div class="call-hist-info">
+                    <div class="call-hist-name">${escHtml(peerName)}</div>
+                    <div class="call-hist-meta" style="color:${statusColor}">
+                        <i class="fa-solid ${statusIcon}"></i>
+                        ${call.type === 'video' ? 'Video' : 'Voice'} · ${isOutgoing ? 'Outgoing' : 'Incoming'}
+                    </div>
+                </div>
+                <div class="call-hist-time">${formatTime(call.created_at)}</div>
+            </div>`;
+        }).join('');
+    } catch(e) {
+        list.innerHTML = '<div class="no-users"><i class="fa-solid fa-circle-exclamation"></i><p>Failed to load</p></div>';
+    }
+}

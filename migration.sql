@@ -86,3 +86,21 @@ create table if not exists blocked_users (
 
 alter table blocked_users enable row level security;
 create policy "Users manage own blocks" on blocked_users for all using (true);
+
+-- ============================================================
+-- REACTIONS TABLE (emoji reactions on messages)
+-- ============================================================
+create table if not exists reactions (
+  id          uuid primary key default uuid_generate_v4(),
+  message_id  uuid references messages(id) on delete cascade not null,
+  user_id     uuid references users(id) on delete cascade not null,
+  username    text not null,
+  emoji       text not null,
+  created_at  timestamp with time zone default now(),
+  unique(message_id, user_id, emoji)
+);
+
+create index if not exists idx_reactions_message on reactions(message_id);
+alter table reactions enable row level security;
+create policy "Reactions viewable by all" on reactions for select using (true);
+create policy "Users manage own reactions" on reactions for all using (true);

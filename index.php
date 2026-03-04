@@ -63,6 +63,9 @@ $user = current_user();
 <!-- ── Context Menu ──────────────────────────────────────── -->
 <div id="ctx-menu">
     <div class="ctx-item" onclick="ctxReply()"><i class="fa-solid fa-reply"></i> Reply</div>
+    <div class="ctx-item copy-only" onclick="ctxCopy()" style="display:none"><i class="fa-solid fa-copy"></i> Copy</div>
+    <div class="ctx-item" onclick="ctxReact()"><i class="fa-regular fa-face-smile"></i> React</div>
+    <div class="ctx-item" onclick="ctxForward()"><i class="fa-solid fa-share"></i> Forward</div>
     <div class="ctx-item edit-only" onclick="ctxEdit()" style="display:none"><i class="fa-solid fa-pen"></i> Edit</div>
     <div class="ctx-item" onclick="ctxBlock()"><i class="fa-solid fa-ban"></i> <span id="ctx-block-label">Block User</span></div>
     <div class="ctx-item danger" onclick="ctxDelete()" style="display:none"><i class="fa-solid fa-trash"></i> Delete</div>
@@ -84,7 +87,12 @@ $user = current_user();
         </div>
     </div>
 
-    <div class="sidebar-search">
+    <div class="sidebar-tabs">
+        <button class="sidebar-tab active" id="tab-chats" onclick="switchTab('chats')"><i class="fa-solid fa-message"></i> Chats</button>
+        <button class="sidebar-tab" id="tab-calls" onclick="switchTab('calls')"><i class="fa-solid fa-phone"></i> Calls</button>
+    </div>
+
+    <div class="sidebar-search" id="chats-search">
         <div class="search-wrap">
             <i class="fa-solid fa-magnifying-glass"></i>
             <input type="text" id="search-input" placeholder="Search people..." oninput="filterUsers(this.value)">
@@ -92,6 +100,10 @@ $user = current_user();
     </div>
 
     <div class="sidebar-body" id="users-list">
+        <div class="sidebar-loading"><i class="fa-solid fa-spinner fa-spin"></i> Loading...</div>
+    </div>
+
+    <div class="sidebar-body" id="calls-list" style="display:none">
         <div class="sidebar-loading"><i class="fa-solid fa-spinner fa-spin"></i> Loading...</div>
     </div>
 
@@ -129,8 +141,8 @@ $user = current_user();
         <!-- Header -->
         <div class="chat-header">
             <button class="btn-icon" onclick="toggleSidebar()"><i class="fa-solid fa-bars"></i></button>
-            <div class="chat-peer-avatar" id="peer-avatar" onclick="toggleSidebar()"></div>
-            <div class="chat-header-info" onclick="toggleSidebar()">
+            <div class="chat-peer-avatar" id="peer-avatar" onclick="activePeer && showProfileModal(activePeer)"></div>
+            <div class="chat-header-info" onclick="activePeer && showProfileModal(activePeer)"  style="cursor:pointer">
                 <div class="chat-header-name" id="peer-name">—</div>
                 <div class="chat-header-sub"  id="peer-sub">Online</div>
             </div>

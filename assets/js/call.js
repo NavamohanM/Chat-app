@@ -11,6 +11,7 @@ let callSeconds = 0;
 let isMuted     = false;
 let isCamOff    = false;
 let incomingCallData = null;
+let callRingTimeout  = null;
 
 const ICE_SERVERS = { iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -101,6 +102,14 @@ async function startCall(type) {
     }
 
     playRinging();
+
+    // Auto-end after 30s if no answer
+    clearTimeout(callRingTimeout);
+    callRingTimeout = setTimeout(async () => {
+        if (!callId) return;
+        showToast('No answer', '');
+        await endCall();
+    }, 30000);
 }
 
 // ── Incoming call ─────────────────────────────────────────────
@@ -121,6 +130,7 @@ function showIncomingCall(call) {
 async function acceptCall() {
     if (!incomingCallData) return;
     stopRinging();
+    clearTimeout(callRingTimeout); callRingTimeout = null;
     document.getElementById('call-incoming').style.display = 'none';
 
     const call = incomingCallData;
@@ -168,6 +178,10 @@ async function acceptCall() {
         document.getElementById('btn-cam').style.display = 'inline-flex';
     }
     incomingCallData = null;
+
+    // Fetch ICE candidates that the caller already stored
+    _iceApplied = new Set();
+    fetchAndApplyIceCandidates();
 }
 
 async function handleAnswer(answerStr) {
@@ -178,8 +192,32 @@ async function handleAnswer(answerStr) {
         if (peerConn.signalingState === 'have-local-offer') {
             await peerConn.setRemoteDescription(new RTCSessionDescription(sdp));
             stopRinging();
+            // Fetch ICE candidates that the receiver stored for us
+            fetchAndApplyIceCandidates();
         }
     } catch(e) { console.error('handleAnswer error:', e); }
+}
+
+// Poll for ICE candidates stored in DB and apply them
+let _iceApplied = new Set(); // reset on each new call via startCall/acceptCall
+async function fetchAndApplyIceCandidates() {
+    if (!callId || !peerConn) return;
+    try {
+        const res  = await fetch('api/call.php?action=get_ice&call_id=' + callId);
+        const json = await res.json();
+        if (json.success && Array.isArray(json.data)) {
+            for (const c of json.data) {
+                const key = JSON.stringify(c);
+                if (_iceApplied.has(key)) continue;
+                _iceApplied.add(key);
+                try { await peerConn.addIceCandidate(new RTCIceCandidate(c)); } catch(e) {}
+            }
+        }
+    } catch(e) {}
+    // Keep polling until connection is established
+    if (peerConn && peerConn.iceConnectionState !== 'connected' && peerConn.iceConnectionState !== 'completed') {
+        setTimeout(fetchAndApplyIceCandidates, 1000);
+    }
 }
 
 function declineCall() {
@@ -203,7 +241,9 @@ function hangupLocal() {
     if (peerConn) { peerConn.close(); peerConn = null; }
     if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
     stopRinging();
+    clearTimeout(callRingTimeout); callRingTimeout = null;
     clearInterval(callTimer); callTimer = null; callSeconds = 0;
+    _iceApplied = new Set();
     document.getElementById('call-active').style.display   = 'none';
     document.getElementById('call-incoming').style.display = 'none';
     document.getElementById('video-container').style.display = 'none';
@@ -255,6 +295,28 @@ function toggleSpeaker() {
     btn.classList.toggle('active', rv.muted);
 }
 
-// ── Ringing sound ─────────────────────────────────────────────
-function playRinging()  { try { const a=$('snd-ringing'); if(a){a.currentTime=0;a.play().catch(()=>{});} } catch(e){} }
-function stopRinging()  { try { const a=$('snd-ringing'); if(a){a.pause();a.currentTime=0;} } catch(e){} }
+// ── Ringing sound (Web Audio API) ─────────────────────────────
+let _ringInterval = null;
+function _ringBeep() {
+    try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        [0, 200].forEach(delay => {
+            const osc = ctx.createOscillator();
+            const g   = ctx.createGain();
+            osc.connect(g); g.connect(ctx.destination);
+            osc.type = 'sine'; osc.frequency.value = 440;
+            g.gain.setValueAtTime(0.2, ctx.currentTime + delay/1000);
+            g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + delay/1000 + 0.18);
+            osc.start(ctx.currentTime + delay/1000);
+            osc.stop(ctx.currentTime + delay/1000 + 0.2);
+        });
+        setTimeout(() => ctx.close(), 600);
+    } catch(e) {}
+}
+function playRinging() {
+    _ringBeep();
+    _ringInterval = setInterval(_ringBeep, 1800);
+}
+function stopRinging() {
+    clearInterval(_ringInterval); _ringInterval = null;
+}

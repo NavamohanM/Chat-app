@@ -17,11 +17,17 @@ if (empty($receiver_id)) { http_response_code(400); echo json_encode(['error'=>'
 if (empty($message) && empty($file_url)) { http_response_code(400); echo json_encode(['error'=>'Message or file required']); exit; }
 if (strlen($message) > 1000) { http_response_code(400); echo json_encode(['error'=>'Message too long']); exit; }
 
+// CSRF check
+$token = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
+if (!hash_equals($_SESSION['csrf_token'] ?? '', $token)) {
+    http_response_code(403); echo json_encode(['error'=>'Invalid request']); exit;
+}
+
 $user = current_user();
 $data = [
     'user_id'     => $user['id'],
     'username'    => $user['username'],
-    'message'     => $message,
+    'message'     => $message ?: '', // always string, never null
     'receiver_id' => $receiver_id,
     'status'      => 'sent',
 ];

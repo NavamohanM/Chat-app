@@ -12,8 +12,8 @@ $before   = $_GET['before'] ?? null;
 
 if (!$other_id) { http_response_code(400); echo json_encode(['error'=>'Missing ?with=']); exit; }
 
-$fields = 'id,user_id,username,message,created_at,receiver_id,file_url,file_name,file_type,reply_to,deleted_at';
-$extra  = '';
+$fields = 'id,user_id,username,message,created_at,receiver_id,file_url,file_name,file_type,reply_to,deleted_at,edited_at,status';
+$extra  = '&deleted_at=is.null';
 if ($after)  $extra .= '&created_at=gt.' . urlencode($after);
 if ($before) $extra .= '&created_at=lt.' . urlencode($before);
 
@@ -23,8 +23,9 @@ $q1 = supabase_request($base . '&user_id=eq.' . $me['id']    . '&receiver_id=eq.
 $q2 = supabase_request($base . '&user_id=eq.' . $other_id    . '&receiver_id=eq.' . $me['id'] . $extra, 'GET', [], true);
 
 if ($q1['status'] !== 200 || $q2['status'] !== 200) {
+    error_log('fetch_messages error: q1=' . $q1['status'] . ' q2=' . $q2['status']);
     http_response_code(500);
-    echo json_encode(['error'=>'Fetch failed','detail'=> $q1['status']!==200?$q1['data']:$q2['data']]);
+    echo json_encode(['error'=>'Failed to load messages']);
     exit;
 }
 
@@ -51,5 +52,11 @@ foreach ($all as &$msg) {
     }
 }
 unset($msg);
+
+// Mark messages sent TO me (from $other_id) as 'delivered' if still 'sent'
+supabase_request(
+    'messages?user_id=eq.' . $other_id . '&receiver_id=eq.' . $me['id'] . '&status=eq.sent',
+    'PATCH', ['status' => 'delivered'], true
+);
 
 echo json_encode(['success' => true, 'data' => $all]);

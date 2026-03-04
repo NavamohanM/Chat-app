@@ -15,8 +15,9 @@ $search = urlencode('%' . $q . '%');
 
 if ($with) {
     // Search within a specific conversation
-    $q1 = supabase_request($fields . '&deleted_at=is.null&message=ilike.' . $search . '&user_id=eq.' . $me['id'] . '&receiver_id=eq.' . $with . '&order=created_at.desc&limit=' . $limit, 'GET', [], true, 'messages?select=');
-    $q2 = supabase_request($fields . '&deleted_at=is.null&message=ilike.' . $search . '&user_id=eq.' . $with . '&receiver_id=eq.' . $me['id'] . '&order=created_at.desc&limit=' . $limit, 'GET', [], true, 'messages?select=');
+    $base = 'messages?select=' . $fields . '&deleted_at=is.null&message=ilike.' . $search . '&order=created_at.desc&limit=' . $limit;
+    $q1 = supabase_request($base . '&user_id=eq.' . $me['id'] . '&receiver_id=eq.' . $with, 'GET', [], true);
+    $q2 = supabase_request($base . '&user_id=eq.' . $with . '&receiver_id=eq.' . $me['id'], 'GET', [], true);
     $all = array_merge($q1['data'] ?? [], $q2['data'] ?? []);
 } else {
     // Search all my conversations
